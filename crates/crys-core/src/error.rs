@@ -47,6 +47,9 @@ pub enum Error {
 
     #[error("invalid hash: {0}")]
     InvalidHash(String),
+
+    #[error("not a chrysalis repository: {0}")]
+    NotARepo(String),
 }
 
 #[cfg(test)]
