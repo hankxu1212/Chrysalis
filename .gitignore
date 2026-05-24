@@ -1,17 +1,10 @@
-# Build output
-/bin/
-/dist/
-/build/
-crys
-crys.exe
+# Cargo / Rust build output
+/target/
+**/*.rs.bk
+Cargo.lock.bak
 
-# Go
-*.exe
-*.test
-*.out
-coverage.out
-coverage.html
-vendor/
+# cargo-dist release artifacts
+/dist/
 
 # Editor / OS
 .DS_Store

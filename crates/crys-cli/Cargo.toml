@@ -1,0 +1,20 @@
+[package]
+name = "crys-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Chrysalis CLI: a platform-agnostic file-sharing tool backed by S3."
+
+[[bin]]
+name = "crys"
+path = "src/main.rs"
+
+[dependencies]
+crys-core = { path = "../crys-core" }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

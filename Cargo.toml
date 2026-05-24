@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = ["crates/crys-cli", "crates/crys-core"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+repository = "https://github.com/hankxu1212/Chrysalis"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+futures = "0.3"
+
+# AWS
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Hashing / compression
+sha2 = "0.10"
+flate2 = "1"
+
+# Errors
+thiserror = "1"
+anyhow = "1"
+
+# Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# FS walking / ignore
+walkdir = "2"
+ignore = "0.4"
+
+# Misc
+bytes = "1"
+hex = "0.4"
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
