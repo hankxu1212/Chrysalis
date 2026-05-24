@@ -44,6 +44,9 @@ pub enum Error {
 
     #[error("s3 error: {0}")]
     S3(String),
+
+    #[error("invalid hash: {0}")]
+    InvalidHash(String),
 }
 
 #[cfg(test)]
