@@ -10,6 +10,7 @@ pub mod repo;
 pub mod s3;
 pub mod stage;
 pub mod store;
+pub mod sync;
 
 pub use error::{Error, Result};
 pub use objects::{CommitBody, EntryMode, FileBody, Hash, ObjectKind, TreeBody, TreeEntry};

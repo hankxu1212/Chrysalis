@@ -65,6 +65,22 @@ impl Hash {
     pub fn storage_path(&self) -> String {
         format!("{}/{}", &self.0[..2], &self.0[2..])
     }
+
+    /// True if this hash is the SHA-256 of `bytes`. Used to verify chunk
+    /// objects on read (chunks are never gzipped, so the hash is over the
+    /// raw payload).
+    pub fn matches_chunk_bytes(&self, bytes: &[u8]) -> bool {
+        Hash::of(bytes) == *self
+    }
+
+    /// True if this hash is the SHA-256 of the *uncompressed* `storage_bytes`.
+    /// Used to verify `file`/`tree`/`commit` objects on read.
+    pub fn matches_storage_bytes(&self, storage_bytes: &[u8]) -> Result<bool> {
+        let mut decoder = GzDecoder::new(storage_bytes);
+        let mut canonical = Vec::new();
+        decoder.read_to_end(&mut canonical)?;
+        Ok(Hash::of(&canonical) == *self)
+    }
 }
 
 impl std::fmt::Display for Hash {

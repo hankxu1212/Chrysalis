@@ -300,6 +300,65 @@ pub fn checkout_tree<'a, S: ObjectStore + 'a>(
     })
 }
 
+/// Walk a tree, rebuilding a flat index that mirrors the working-tree state
+/// at that snapshot. Used by `clone`/`pull` to set `.crys/index` after
+/// materializing files.
+pub fn rebuild_index_from_tree<'a, S: ObjectStore + 'a>(
+    store: &'a S,
+    tree_hash: &'a Hash,
+    workdir: &'a Path,
+) -> futures::future::BoxFuture<'a, Result<IndexFile>> {
+    Box::pin(async move {
+        let mut index = IndexFile::default();
+        rebuild_index_walk(store, tree_hash, workdir, "", &mut index).await?;
+        Ok(index)
+    })
+}
+
+fn rebuild_index_walk<'a, S: ObjectStore + 'a>(
+    store: &'a S,
+    tree_hash: &'a Hash,
+    workdir: &'a Path,
+    rel_prefix: &'a str,
+    index: &'a mut IndexFile,
+) -> futures::future::BoxFuture<'a, Result<()>> {
+    Box::pin(async move {
+        let bytes = store.get(tree_hash).await?;
+        let body = TreeBody::from_storage_bytes(&bytes)?;
+        for entry in body.entries {
+            let rel = if rel_prefix.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{rel_prefix}/{}", entry.name)
+            };
+            match entry.mode {
+                EntryMode::Dir => {
+                    rebuild_index_walk(store, &entry.hash, workdir, &rel, index).await?;
+                }
+                EntryMode::File => {
+                    let file_bytes = store.get(&entry.hash).await?;
+                    let file_body = FileBody::from_storage_bytes(&file_bytes)?;
+                    let on_disk = workdir.join(&rel);
+                    let mtime = std::fs::metadata(&on_disk)
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .map(|t| chrono::DateTime::<Utc>::from(t).to_rfc3339())
+                        .unwrap_or_else(|| Utc::now().to_rfc3339());
+                    index.entries.insert(
+                        rel,
+                        IndexEntry {
+                            file_hash: entry.hash,
+                            mtime,
+                            size: file_body.size,
+                        },
+                    );
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
 async fn checkout_file<S: ObjectStore>(store: &S, file_hash: &Hash, dest: &Path) -> Result<()> {
     let bytes = store.get(file_hash).await?;
     let body = FileBody::from_storage_bytes(&bytes)?;
