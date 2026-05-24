@@ -4,8 +4,10 @@
 //! architecture this crate implements.
 
 mod error;
+pub mod s3;
 
 pub use error::{Error, Result};
+pub use s3::{S3Client, S3Uri};
 
 /// Crate version, surfaced to the CLI for `crys --version`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

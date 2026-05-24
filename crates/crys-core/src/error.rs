@@ -32,6 +32,18 @@ pub enum Error {
 
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("invalid s3 uri: {0}")]
+    InvalidS3Uri(String),
+
+    #[error("object not found: s3://{bucket}/{key}")]
+    NotFound { bucket: String, key: String },
+
+    #[error("precondition failed (object already exists): s3://{bucket}/{key}")]
+    PreconditionFailed { bucket: String, key: String },
+
+    #[error("s3 error: {0}")]
+    S3(String),
 }
 
 #[cfg(test)]
@@ -49,6 +61,16 @@ mod tests {
                 hash: "deadbeef".into(),
                 source_store: "local",
             },
+            Error::InvalidS3Uri("not-an-s3-uri".into()),
+            Error::NotFound {
+                bucket: "b".into(),
+                key: "k".into(),
+            },
+            Error::PreconditionFailed {
+                bucket: "b".into(),
+                key: "k".into(),
+            },
+            Error::S3("boom".into()),
         ];
         for err in cases {
             let s = err.to_string();
