@@ -92,7 +92,20 @@ pub struct S3Client {
 impl S3Client {
     /// Build an `S3Client` from the default AWS credential chain.
     pub async fn from_env() -> Self {
-        let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+        Self::with_profile_and_region(None, None).await
+    }
+
+    /// Build an `S3Client` with explicit `profile` and/or `region` overrides.
+    /// Either `None` falls through to the standard AWS config resolution.
+    pub async fn with_profile_and_region(profile: Option<&str>, region: Option<&str>) -> Self {
+        let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
+        if let Some(profile) = profile {
+            loader = loader.profile_name(profile);
+        }
+        if let Some(region) = region {
+            loader = loader.region(aws_config::Region::new(region.to_string()));
+        }
+        let config = loader.load().await;
         Self {
             inner: SdkClient::new(&config),
         }

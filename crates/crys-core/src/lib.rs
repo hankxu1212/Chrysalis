@@ -4,11 +4,15 @@
 //! architecture this crate implements.
 
 pub mod chunker;
+pub mod clean;
 mod error;
+pub mod global_config;
+pub mod log;
 pub mod objects;
 pub mod repo;
 pub mod s3;
 pub mod stage;
+pub mod status;
 pub mod store;
 pub mod sync;
 

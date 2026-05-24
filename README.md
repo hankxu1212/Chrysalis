@@ -52,6 +52,10 @@ AWS_PROFILE=chrysalis crys pull
 | `crys init <s3-uri>` | Initialize `.crys/` and bootstrap the remote (`config.json` + empty `HEAD`). `--local-only` skips the S3 round-trip. |
 | `crys add <paths...>` | Stage files into the index. Walks recursively, honoring `.crysignore`. |
 | `crys commit -m "<msg>"` | Record the index as a new commit. Refuses if the resulting tree matches `HEAD`. |
+| `crys status` | Show staged / unstaged / untracked changes (git-style). |
+| `crys log [-n N]` | List commit history newest-first. |
+| `crys clean [-n]` | Remove untracked files. `-n` shows what would be removed. Honors `.crysignore`. |
+| `crys config show \| get \| set \| unset [--global] <key> [<value>]` | Read/write per-repo or global config. |
 | `crys fetch` | Refresh `REMOTE_HEAD` and download metadata for any new commits (no chunks). |
 | `crys pull` | Fetch then fast-forward the working tree to the remote tip. Refuses if the working tree has uncommitted changes. |
 | `crys push` | Upload local commits to the remote (fast-forward only). |
@@ -62,6 +66,26 @@ AWS_PROFILE=chrysalis crys pull
 Chrysalis uses the standard AWS credential chain via `aws-config`: env vars,
 `~/.aws/credentials`, IAM role, SSO. Chrysalis never reads or stores
 credentials directly.
+
+To avoid setting `AWS_PROFILE` / `AWS_REGION` every time, configure once:
+
+```bash
+# Global default — applies everywhere unless overridden.
+crys config set --global default_profile chrysalis-dev
+crys config set --global default_region  us-west-2
+
+# Per-repo override — pinned at init time, or set later.
+crys init s3://bucket/path --profile chrysalis-dev --region us-west-2
+crys config set aws_profile chrysalis-dev
+crys config set region us-west-2
+
+# Inspect what's in scope.
+crys config show
+```
+
+Resolution order: `--profile`/`--region` flag → `AWS_PROFILE`/`AWS_REGION` env →
+per-repo `.crys/config` → global `~/.config/chrysalis/config.json` → AWS SDK
+default chain.
 
 ## Configuration
 

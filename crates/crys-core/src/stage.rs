@@ -66,6 +66,7 @@ pub async fn add<S: ObjectStore>(repo: &Repo, store: &S, path: &Path) -> Result<
     let chunk_size = repo.config().chunk_size as usize;
     let mut index = repo.read_index().await?;
     let mut staged = Vec::new();
+    let mut seen_under_path: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     let walker = WalkBuilder::new(&abs)
         .hidden(false) // Don't auto-skip dotfiles; .crysignore is the source of truth.
@@ -100,11 +101,41 @@ pub async fn add<S: ObjectStore>(repo: &Repo, store: &S, path: &Path) -> Result<
 
         let index_entry = stage_one_file(store, entry_path, chunk_size).await?;
         index.entries.insert(rel_posix.clone(), index_entry);
+        seen_under_path.insert(rel_posix.clone());
         staged.push(rel_posix);
+    }
+
+    // Drop any indexed file that lives under `path` but no longer exists on
+    // disk. Without this, `crys add .` after deleting a file silently leaves
+    // a stale index entry, and the next `commit` won't reflect the deletion.
+    //
+    // We only prune entries whose POSIX path is under the staged subtree —
+    // a `crys add subdir/` should never touch index entries outside `subdir/`.
+    let workdir_prefix = posix_path_under(&abs, repo.workdir());
+    let stale: Vec<String> = index
+        .entries
+        .keys()
+        .filter(|k| match &workdir_prefix {
+            Some(p) if !p.is_empty() => k.as_str() == p.as_str() || k.starts_with(&format!("{p}/")),
+            _ => true, // staging the workdir root → consider all entries
+        })
+        .filter(|k| !seen_under_path.contains(k.as_str()))
+        .cloned()
+        .collect();
+    for key in &stale {
+        index.entries.remove(key);
+        staged.push(key.clone());
     }
 
     repo.write_index(&index).await?;
     Ok(staged)
+}
+
+/// If `abs` is under `workdir`, return its POSIX-form relative path (empty
+/// string if equal). Otherwise None.
+fn posix_path_under(abs: &Path, workdir: &Path) -> Option<String> {
+    let rel = abs.strip_prefix(workdir).ok()?;
+    Some(posix_path(rel))
 }
 
 async fn stage_one_file<S: ObjectStore>(
@@ -263,7 +294,7 @@ async fn parent_tree_hash<S: ObjectStore>(store: &S, commit_hash: &Hash) -> Resu
     Ok(body.tree)
 }
 
-fn posix_path(p: &Path) -> String {
+pub(crate) fn posix_path(p: &Path) -> String {
     let mut parts = Vec::new();
     for component in p.components() {
         if let std::path::Component::Normal(s) = component {
@@ -507,6 +538,40 @@ mod tests {
             std::fs::read(restore_dir.path().join("src/sub/deep.txt")).unwrap(),
             b"deep"
         );
+    }
+
+    #[tokio::test]
+    async fn add_picks_up_deletions_within_path() {
+        let (dir, repo, store) = fresh_repo().await;
+        write_file(dir.path(), "a.txt", b"x");
+        write_file(dir.path(), "sub/b.txt", b"x");
+        write_file(dir.path(), "outside/c.txt", b"x");
+        add(&repo, &store, dir.path()).await.unwrap();
+
+        // Delete a tracked file under sub/ and re-add only sub/.
+        std::fs::remove_file(dir.path().join("sub/b.txt")).unwrap();
+        add(&repo, &store, &dir.path().join("sub")).await.unwrap();
+
+        let index = repo.read_index().await.unwrap();
+        // sub/b.txt is gone from the index.
+        assert!(!index.entries.contains_key("sub/b.txt"));
+        // But files outside the staged path are untouched.
+        assert!(index.entries.contains_key("a.txt"));
+        assert!(index.entries.contains_key("outside/c.txt"));
+    }
+
+    #[tokio::test]
+    async fn add_root_picks_up_all_deletions() {
+        let (dir, repo, store) = fresh_repo().await;
+        write_file(dir.path(), "a.txt", b"x");
+        write_file(dir.path(), "b.txt", b"x");
+        add(&repo, &store, dir.path()).await.unwrap();
+        std::fs::remove_file(dir.path().join("a.txt")).unwrap();
+        add(&repo, &store, dir.path()).await.unwrap();
+
+        let index = repo.read_index().await.unwrap();
+        assert!(!index.entries.contains_key("a.txt"));
+        assert!(index.entries.contains_key("b.txt"));
     }
 
     #[tokio::test]

@@ -28,6 +28,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Arc;
 
 use futures::stream::{FuturesUnordered, StreamExt};
 
@@ -39,6 +40,49 @@ use crate::{Error, Result};
 
 /// Concurrency for transfer operations. Bounds memory and S3 connection use.
 const TRANSFER_CONCURRENCY: usize = 16;
+
+/// Reporter for long-running transfer operations (push/clone/pull).
+///
+/// Called from inside `copy_many` for transfer phases, and from
+/// `walk_reachable` for the discovery phase that precedes them. CLI
+/// implementations render progress bars; library consumers can pass
+/// [`NoopProgress`] when they don't care.
+///
+/// Methods are sync because the CLI's progress backend (`indicatif`) is sync;
+/// the cost of calling these inside `copy_one` is negligible vs. an S3
+/// round-trip.
+pub trait Progress: Send + Sync {
+    /// Announce a phase. `total = 0` signals an indeterminate phase, which
+    /// the CLI renders as a spinner. Otherwise renders as a progress bar.
+    /// `kind` is one of `"walking"`, `"chunks"`, `"files"`, `"trees"`,
+    /// `"commits"`.
+    fn start_phase(&self, kind: &str, total: usize);
+    /// One object finished. `bytes` is its size on the wire (0 for the
+    /// walking phase, where nothing is copied).
+    fn object_copied(&self, kind: &str, bytes: u64);
+    /// Phase done.
+    fn finish_phase(&self, kind: &str);
+}
+
+/// No-op progress reporter for tests and library callers that don't render
+/// progress.
+#[derive(Debug, Default)]
+pub struct NoopProgress;
+
+impl Progress for NoopProgress {
+    fn start_phase(&self, _: &str, _: usize) {}
+    fn object_copied(&self, _: &str, _: u64) {}
+    fn finish_phase(&self, _: &str) {}
+}
+
+/// Trait-object alias used by the long-running sync entry points so callers
+/// can swap reporters without dragging a generic parameter through every
+/// signature.
+pub type ProgressHandle = Arc<dyn Progress>;
+
+fn noop() -> ProgressHandle {
+    Arc::new(NoopProgress)
+}
 
 /// What to enumerate during a reachability walk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +126,22 @@ pub async fn walk_reachable<S: ObjectStore>(
     scope: WalkScope,
     stop_at: Option<&Hash>,
 ) -> Result<ReachableSet> {
+    walk_reachable_with_progress(source, tip, scope, stop_at, &noop()).await
+}
+
+/// Same as [`walk_reachable`] but reports per-object progress via the
+/// `"walking"` phase. The walk does N sequential GETs to inflate every
+/// commit/tree/file body, so on a large repo this is the slowest phase by
+/// wall time before any bar is visible — emitting a spinner here is what
+/// makes `crys clone` look alive on big repos.
+pub async fn walk_reachable_with_progress<S: ObjectStore>(
+    source: &S,
+    tip: &Hash,
+    scope: WalkScope,
+    stop_at: Option<&Hash>,
+    progress: &ProgressHandle,
+) -> Result<ReachableSet> {
+    progress.start_phase("walking", 0);
     let mut set = ReachableSet::default();
     let mut commit_seen = HashSet::new();
     let mut tree_seen = HashSet::new();
@@ -100,6 +160,7 @@ pub async fn walk_reachable<S: ObjectStore>(
         verify_storage_object(&commit_hash, &bytes)?;
         let body = CommitBody::from_storage_bytes(&bytes)?;
         set.commits.push(commit_hash.clone());
+        progress.object_copied("walking", 0);
 
         walk_tree(
             source,
@@ -109,6 +170,7 @@ pub async fn walk_reachable<S: ObjectStore>(
             &mut file_seen,
             &mut chunk_seen,
             &mut set,
+            progress,
         )
         .await?;
 
@@ -117,9 +179,11 @@ pub async fn walk_reachable<S: ObjectStore>(
         }
     }
 
+    progress.finish_phase("walking");
     Ok(set)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_tree<'a, S: ObjectStore>(
     source: &'a S,
     tree_hash: &'a Hash,
@@ -128,6 +192,7 @@ fn walk_tree<'a, S: ObjectStore>(
     file_seen: &'a mut HashSet<Hash>,
     chunk_seen: &'a mut HashSet<Hash>,
     set: &'a mut ReachableSet,
+    progress: &'a ProgressHandle,
 ) -> futures::future::BoxFuture<'a, Result<()>> {
     Box::pin(async move {
         if !tree_seen.insert(tree_hash.clone()) {
@@ -137,6 +202,7 @@ fn walk_tree<'a, S: ObjectStore>(
         verify_storage_object(tree_hash, &bytes)?;
         let body = TreeBody::from_storage_bytes(&bytes)?;
         set.trees.push(tree_hash.clone());
+        progress.object_copied("walking", 0);
 
         for entry in body.entries {
             match entry.mode {
@@ -149,6 +215,7 @@ fn walk_tree<'a, S: ObjectStore>(
                         file_seen,
                         chunk_seen,
                         set,
+                        progress,
                     )
                     .await?;
                 }
@@ -160,6 +227,7 @@ fn walk_tree<'a, S: ObjectStore>(
                     verify_storage_object(&entry.hash, &file_bytes)?;
                     let file_body = FileBody::from_storage_bytes(&file_bytes)?;
                     set.files.push(entry.hash.clone());
+                    progress.object_copied("walking", 0);
                     if scope == WalkScope::Full {
                         for chunk in file_body.chunks {
                             if chunk_seen.insert(chunk.clone()) {
@@ -221,14 +289,18 @@ fn verify_chunk_object(hash: &Hash, bytes: &[u8]) -> Result<()> {
 
 /// Copy one hash from `source` to `dest` if it's not already present in
 /// `dest`. Verifies the bytes match the hash before writing.
+///
+/// Returns the size in bytes of the object that was copied, or `None` if
+/// the destination already had it (so progress reporters don't double-count
+/// on a resumed push).
 async fn copy_one<S: ObjectStore, D: ObjectStore>(
     source: &S,
     dest: &D,
     hash: &Hash,
     is_chunk: bool,
-) -> Result<()> {
+) -> Result<Option<u64>> {
     if dest.has(hash).await? {
-        return Ok(());
+        return Ok(None);
     }
     let bytes = source.get(hash).await?;
     if is_chunk {
@@ -236,18 +308,33 @@ async fn copy_one<S: ObjectStore, D: ObjectStore>(
     } else {
         verify_storage_object(hash, &bytes)?;
     }
+    let len = bytes.len() as u64;
     dest.put(hash, bytes).await?;
-    Ok(())
+    Ok(Some(len))
 }
 
 /// Copy a list of hashes from `source` to `dest` in parallel, bounded by
 /// [`TRANSFER_CONCURRENCY`]. All hashes here must be of the same kind so we
 /// can route through the right verification path.
-async fn copy_many<S, D>(source: &S, dest: &D, hashes: &[Hash], is_chunk: bool) -> Result<()>
+///
+/// Reports progress through `progress` with the phase name `kind`
+/// (`"chunks"`, `"files"`, `"trees"`, `"commits"`).
+async fn copy_many<S, D>(
+    source: &S,
+    dest: &D,
+    hashes: &[Hash],
+    is_chunk: bool,
+    kind: &str,
+    progress: &ProgressHandle,
+) -> Result<()>
 where
     S: ObjectStore,
     D: ObjectStore,
 {
+    if hashes.is_empty() {
+        return Ok(());
+    }
+    progress.start_phase(kind, hashes.len());
     let mut iter = hashes.iter();
     let mut in_flight = FuturesUnordered::new();
 
@@ -257,11 +344,13 @@ where
         }
     }
     while let Some(result) = in_flight.next().await {
-        result?;
+        let copied = result?;
+        progress.object_copied(kind, copied.unwrap_or(0));
         if let Some(hash) = iter.next() {
             in_flight.push(copy_one(source, dest, hash, is_chunk));
         }
     }
+    progress.finish_phase(kind);
     Ok(())
 }
 
@@ -269,6 +358,14 @@ where
 /// commit/tree/file objects but no chunks. Returns the new remote HEAD if it
 /// changed.
 pub async fn fetch<R: ObjectStore>(repo: &Repo, remote: &R) -> Result<Option<Hash>> {
+    fetch_with_progress(repo, remote, &noop()).await
+}
+
+pub async fn fetch_with_progress<R: ObjectStore>(
+    repo: &Repo,
+    remote: &R,
+    progress: &ProgressHandle,
+) -> Result<Option<Hash>> {
     let local = repo.store().await?;
     let remote_head = remote.get_head().await?;
     let observed = repo.remote_head().await?;
@@ -281,10 +378,17 @@ pub async fn fetch<R: ObjectStore>(repo: &Repo, remote: &R) -> Result<Option<Has
         // Walk only the portion of history not already local: stop if we
         // encounter a commit already present locally.
         let stop_at = repo.head().await?;
-        let set = walk_reachable(remote, tip, WalkScope::MetadataOnly, stop_at.as_ref()).await?;
-        copy_many(remote, &local, &set.commits, false).await?;
-        copy_many(remote, &local, &set.trees, false).await?;
-        copy_many(remote, &local, &set.files, false).await?;
+        let set = walk_reachable_with_progress(
+            remote,
+            tip,
+            WalkScope::MetadataOnly,
+            stop_at.as_ref(),
+            progress,
+        )
+        .await?;
+        copy_many(remote, &local, &set.commits, false, "commits", progress).await?;
+        copy_many(remote, &local, &set.trees, false, "trees", progress).await?;
+        copy_many(remote, &local, &set.files, false, "files", progress).await?;
     }
 
     repo.set_remote_head(remote_head.as_ref()).await?;
@@ -295,8 +399,16 @@ pub async fn fetch<R: ObjectStore>(repo: &Repo, remote: &R) -> Result<Option<Has
 /// the new portion of history in dependency order, then writes `HEAD`
 /// unconditionally.
 pub async fn push<R: ObjectStore>(repo: &Repo, remote: &R) -> Result<Option<Hash>> {
+    push_with_progress(repo, remote, &noop()).await
+}
+
+pub async fn push_with_progress<R: ObjectStore>(
+    repo: &Repo,
+    remote: &R,
+    progress: &ProgressHandle,
+) -> Result<Option<Hash>> {
     let local = repo.store().await?;
-    fetch(repo, remote).await?;
+    fetch_with_progress(repo, remote, progress).await?;
 
     let local_head = repo.head().await?;
     let remote_head = repo.remote_head().await?;
@@ -317,12 +429,19 @@ pub async fn push<R: ObjectStore>(repo: &Repo, remote: &R) -> Result<Option<Hash
 
     // Compute upload set, stopping at the current remote head so we don't
     // re-walk already-pushed history.
-    let set = walk_reachable(&local, &local_tip, WalkScope::Full, remote_head.as_ref()).await?;
+    let set = walk_reachable_with_progress(
+        &local,
+        &local_tip,
+        WalkScope::Full,
+        remote_head.as_ref(),
+        progress,
+    )
+    .await?;
 
-    copy_many(&local, remote, &set.chunks, true).await?;
-    copy_many(&local, remote, &set.files, false).await?;
-    copy_many(&local, remote, &set.trees, false).await?;
-    copy_many(&local, remote, &set.commits, false).await?;
+    copy_many(&local, remote, &set.chunks, true, "chunks", progress).await?;
+    copy_many(&local, remote, &set.files, false, "files", progress).await?;
+    copy_many(&local, remote, &set.trees, false, "trees", progress).await?;
+    copy_many(&local, remote, &set.commits, false, "commits", progress).await?;
 
     // Final unconditional HEAD write — last writer wins (design §10).
     remote.put_head(Some(&local_tip)).await?;
@@ -334,8 +453,16 @@ pub async fn push<R: ObjectStore>(repo: &Repo, remote: &R) -> Result<Option<Hash
 /// missing chunks for the new tip's tree, materializes the working tree,
 /// advances `HEAD`.
 pub async fn pull<R: ObjectStore>(repo: &Repo, remote: &R) -> Result<Option<Hash>> {
+    pull_with_progress(repo, remote, &noop()).await
+}
+
+pub async fn pull_with_progress<R: ObjectStore>(
+    repo: &Repo,
+    remote: &R,
+    progress: &ProgressHandle,
+) -> Result<Option<Hash>> {
     let local = repo.store().await?;
-    let remote_head = fetch(repo, remote).await?;
+    let remote_head = fetch_with_progress(repo, remote, progress).await?;
     let local_head = repo.head().await?;
 
     let remote_tip = match remote_head {
@@ -359,20 +486,78 @@ pub async fn pull<R: ObjectStore>(repo: &Repo, remote: &R) -> Result<Option<Hash
 
     // Walk to discover and download missing chunks (and any
     // not-yet-fetched manifests, defensively).
-    let set = walk_reachable(remote, &remote_tip, WalkScope::Full, local_head.as_ref()).await?;
-    copy_many(remote, &local, &set.commits, false).await?;
-    copy_many(remote, &local, &set.trees, false).await?;
-    copy_many(remote, &local, &set.files, false).await?;
-    copy_many(remote, &local, &set.chunks, true).await?;
+    let set = walk_reachable_with_progress(
+        remote,
+        &remote_tip,
+        WalkScope::Full,
+        local_head.as_ref(),
+        progress,
+    )
+    .await?;
+    copy_many(remote, &local, &set.commits, false, "commits", progress).await?;
+    copy_many(remote, &local, &set.trees, false, "trees", progress).await?;
+    copy_many(remote, &local, &set.files, false, "files", progress).await?;
+    copy_many(remote, &local, &set.chunks, true, "chunks", progress).await?;
 
     let commit_bytes = local.get(&remote_tip).await?;
     let commit = CommitBody::from_storage_bytes(&commit_bytes)?;
 
+    // Snapshot the previous tree's paths so we can delete any file that's
+    // no longer in the new tree.
+    let old_index = repo.read_index().await?;
+    let old_paths: std::collections::BTreeSet<String> = old_index.entries.keys().cloned().collect();
+
     materialize_tree(repo.workdir(), &local, &commit.tree).await?;
     let new_index = rebuild_index_from_tree(&local, &commit.tree, repo.workdir()).await?;
+    let new_paths: std::collections::BTreeSet<String> = new_index.entries.keys().cloned().collect();
+    delete_removed_paths(repo.workdir(), &old_paths, &new_paths)?;
+
     repo.write_index(&new_index).await?;
     repo.set_head(Some(&remote_tip)).await?;
     Ok(Some(remote_tip))
+}
+
+/// Delete any working-tree file that was in `old_paths` but not in
+/// `new_paths`. After deleting files, walk back up each path's ancestor
+/// chain removing now-empty directories — no point leaving empty dir
+/// husks where the user expected things gone.
+fn delete_removed_paths(
+    workdir: &Path,
+    old_paths: &std::collections::BTreeSet<String>,
+    new_paths: &std::collections::BTreeSet<String>,
+) -> Result<()> {
+    let removed: Vec<&String> = old_paths.difference(new_paths).collect();
+    let mut maybe_empty_dirs: std::collections::BTreeSet<std::path::PathBuf> =
+        std::collections::BTreeSet::new();
+
+    for rel in removed {
+        let path = workdir.join(rel);
+        match std::fs::remove_file(&path) {
+            Ok(_) => {}
+            // Already gone; that's fine.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        let mut parent = path.parent();
+        while let Some(p) = parent {
+            if p == workdir {
+                break;
+            }
+            maybe_empty_dirs.insert(p.to_path_buf());
+            parent = p.parent();
+        }
+    }
+
+    // Try to remove empty dirs deepest-first. `remove_dir` only succeeds on
+    // empty directories; any other error (most commonly "not empty") is
+    // intentionally ignored — we don't want to fail pull just because the
+    // user has untracked files alongside removed ones.
+    let mut sorted: Vec<_> = maybe_empty_dirs.into_iter().collect();
+    sorted.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    for dir in sorted {
+        let _ = std::fs::remove_dir(&dir);
+    }
+    Ok(())
 }
 
 /// Bootstrap a fresh local clone of `remote` at `dest`. Mirrors `crys clone`
@@ -384,17 +569,27 @@ pub async fn clone_repo<R: ObjectStore>(
     remote_uri: &str,
     dest: impl AsRef<Path>,
 ) -> Result<Repo> {
+    clone_with_progress(remote, remote_uri, dest, &noop()).await
+}
+
+pub async fn clone_with_progress<R: ObjectStore>(
+    remote: &R,
+    remote_uri: &str,
+    dest: impl AsRef<Path>,
+    progress: &ProgressHandle,
+) -> Result<Repo> {
     let dest = dest.as_ref();
     let repo = Repo::init(dest, remote_uri).await?;
     let local = repo.store().await?;
 
     let remote_tip = remote.get_head().await?;
     if let Some(tip) = &remote_tip {
-        let set = walk_reachable(remote, tip, WalkScope::Full, None).await?;
-        copy_many(remote, &local, &set.commits, false).await?;
-        copy_many(remote, &local, &set.trees, false).await?;
-        copy_many(remote, &local, &set.files, false).await?;
-        copy_many(remote, &local, &set.chunks, true).await?;
+        let set =
+            walk_reachable_with_progress(remote, tip, WalkScope::Full, None, progress).await?;
+        copy_many(remote, &local, &set.commits, false, "commits", progress).await?;
+        copy_many(remote, &local, &set.trees, false, "trees", progress).await?;
+        copy_many(remote, &local, &set.files, false, "files", progress).await?;
+        copy_many(remote, &local, &set.chunks, true, "chunks", progress).await?;
 
         let commit_bytes = local.get(tip).await?;
         let commit = CommitBody::from_storage_bytes(&commit_bytes)?;
@@ -632,6 +827,46 @@ mod tests {
         // Second push: same tip → must not duplicate any objects.
         push(&repo_a, &remote).await.unwrap();
         assert_eq!(remote.list().await.unwrap().len(), count_after_first);
+    }
+
+    #[tokio::test]
+    async fn pull_removes_files_deleted_on_remote() {
+        // Repo A creates two files, pushes, deletes one, pushes again.
+        let (dir_a, repo_a, remote) = fixture().await;
+        let store_a = repo_a.store().await.unwrap();
+        write_file(dir_a.path(), "keep.txt", b"k");
+        write_file(dir_a.path(), "remove.txt", b"r");
+        write_file(dir_a.path(), "sub/inside.txt", b"i");
+        stage::add(&repo_a, &store_a, dir_a.path()).await.unwrap();
+        stage::commit(&repo_a, &store_a, "alice", "c1")
+            .await
+            .unwrap();
+        push(&repo_a, &remote).await.unwrap();
+
+        // Repo B clones the initial state.
+        let dir_b = tempfile::tempdir().unwrap();
+        let repo_b = clone_repo(&remote, "memory://shared", dir_b.path())
+            .await
+            .unwrap();
+        assert!(dir_b.path().join("remove.txt").exists());
+        assert!(dir_b.path().join("sub/inside.txt").exists());
+
+        // Repo A deletes files and pushes the deletion.
+        std::fs::remove_file(dir_a.path().join("remove.txt")).unwrap();
+        std::fs::remove_file(dir_a.path().join("sub/inside.txt")).unwrap();
+        stage::add(&repo_a, &store_a, dir_a.path()).await.unwrap();
+        stage::commit(&repo_a, &store_a, "alice", "delete some")
+            .await
+            .unwrap();
+        push(&repo_a, &remote).await.unwrap();
+
+        // Repo B pulls. The deleted files must be gone from disk.
+        pull(&repo_b, &remote).await.unwrap();
+        assert!(dir_b.path().join("keep.txt").exists());
+        assert!(!dir_b.path().join("remove.txt").exists());
+        assert!(!dir_b.path().join("sub/inside.txt").exists());
+        // Empty `sub/` dir should also be cleaned up.
+        assert!(!dir_b.path().join("sub").exists());
     }
 
     #[tokio::test]

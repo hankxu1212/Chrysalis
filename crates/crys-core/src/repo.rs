@@ -36,7 +36,14 @@ const INDEX_FILE: &str = "index";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub remote: String,
+    /// AWS region for the remote bucket. Falls back to env / profile default
+    /// if `None`.
+    #[serde(default)]
     pub region: Option<String>,
+    /// Named AWS profile to use. Falls back to env / default credential
+    /// chain if `None`.
+    #[serde(default)]
+    pub aws_profile: Option<String>,
     pub chunk_size: u64,
 }
 
@@ -93,6 +100,17 @@ impl Repo {
     /// also writes the remote `config.json` and `HEAD` to S3 — that's not
     /// done here so the function stays independently testable without AWS.
     pub async fn init(workdir: impl Into<PathBuf>, remote: impl Into<String>) -> Result<Self> {
+        Self::init_with(workdir, remote, None, None).await
+    }
+
+    /// Like [`Self::init`] but lets the caller record AWS profile/region in
+    /// the per-repo config so future commands don't need env vars.
+    pub async fn init_with(
+        workdir: impl Into<PathBuf>,
+        remote: impl Into<String>,
+        aws_profile: Option<String>,
+        region: Option<String>,
+    ) -> Result<Self> {
         let workdir = workdir.into();
         let crys_dir = workdir.join(CRYS_DIR);
         if crys_dir.exists() {
@@ -102,7 +120,8 @@ impl Repo {
 
         let config = Config {
             remote: remote.into(),
-            region: None,
+            region,
+            aws_profile,
             chunk_size: DEFAULT_CHUNK_SIZE,
         };
         write_json(&crys_dir.join(CONFIG_FILE), &config).await?;
@@ -182,6 +201,13 @@ impl Repo {
     /// Overwrite `.crys/REMOTE_HEAD`.
     pub async fn set_remote_head(&self, head: Option<&Hash>) -> Result<()> {
         write_hash_file(&self.crys_dir.join(REMOTE_HEAD_FILE), head).await
+    }
+
+    /// Persist a new local config (`.crys/config`).
+    pub async fn write_config(&mut self, config: Config) -> Result<()> {
+        write_json(&self.crys_dir.join(CONFIG_FILE), &config).await?;
+        self.config = config;
+        Ok(())
     }
 
     pub async fn read_index(&self) -> Result<IndexFile> {
