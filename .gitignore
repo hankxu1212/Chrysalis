@@ -1,0 +1,33 @@
+# Build output
+/bin/
+/dist/
+/build/
+crys
+crys.exe
+
+# Go
+*.exe
+*.test
+*.out
+coverage.out
+coverage.html
+vendor/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Env / credentials
+.env
+.env.*
+!.env.example
+
+# Chrysalis runtime artifacts (in case of dogfooding inside the repo)
+.crys/
+
+/docs/
