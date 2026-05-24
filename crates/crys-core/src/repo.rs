@@ -15,8 +15,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
+use crate::s3::S3Client;
 use crate::store::LocalStore;
-use crate::{Error, Hash, Result};
+use crate::{Error, Hash, Result, S3Uri};
 
 /// Default chunk size in bytes (8 MB), matching design §4.
 pub const DEFAULT_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
@@ -191,6 +192,48 @@ impl Repo {
     pub async fn write_index(&self, index: &IndexFile) -> Result<()> {
         write_json(&self.crys_dir.join(INDEX_FILE), index).await
     }
+}
+
+/// Bootstrap a fresh repository on S3 (design §8 step 2 of `crys init`).
+///
+/// Writes `config.json` and an empty `HEAD` under the given prefix using
+/// conditional create — if either object already exists, returns
+/// [`Error::RepoExists`] and leaves the bucket untouched.
+pub async fn init_remote(client: &S3Client, uri: &S3Uri, chunk_size: u64) -> Result<()> {
+    let prefix = uri.key.trim_end_matches('/');
+    let join = |seg: &str| {
+        if prefix.is_empty() {
+            seg.to_string()
+        } else {
+            format!("{prefix}/{seg}")
+        }
+    };
+    let config_key = join("config.json");
+    let head_key = join("HEAD");
+
+    // Refuse if a repo is already present, by checking config.json existence
+    // first — that's the cheapest single-object signal.
+    if client.head(&uri.bucket, &config_key).await? {
+        return Err(Error::RepoExists(format!("s3://{}/{}", uri.bucket, prefix)));
+    }
+
+    let remote_config = RemoteConfig::new(chunk_size);
+    let config_bytes = bytes::Bytes::from(serde_json::to_vec(&remote_config)?);
+    if let Err(Error::PreconditionFailed { .. }) = client
+        .put_if_absent(&uri.bucket, &config_key, config_bytes)
+        .await
+    {
+        return Err(Error::RepoExists(format!("s3://{}/{}", uri.bucket, prefix)));
+    }
+
+    if let Err(Error::PreconditionFailed { .. }) = client
+        .put_if_absent(&uri.bucket, &head_key, bytes::Bytes::new())
+        .await
+    {
+        return Err(Error::RepoExists(format!("s3://{}/{}", uri.bucket, prefix)));
+    }
+
+    Ok(())
 }
 
 async fn read_hash_file(path: &Path) -> Result<Option<Hash>> {

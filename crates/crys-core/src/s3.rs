@@ -13,10 +13,21 @@ use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::operation::head_object::HeadObjectError;
 use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::Client as SdkClient;
 use bytes::Bytes;
 
 use crate::{Error, Result};
+
+/// Default threshold above which `put_multipart_streaming` actually uses
+/// multipart. Matches the design's default chunk size — there's no point in
+/// multipart for sub-8 MB payloads.
+pub const MULTIPART_THRESHOLD: usize = 8 * 1024 * 1024;
+
+/// Default part size for multipart uploads. AWS requires every part except
+/// the last to be at least 5 MB; 8 MB matches the chunker's default chunk
+/// size so each chunk maps cleanly to one part.
+pub const MULTIPART_PART_SIZE: usize = 8 * 1024 * 1024;
 
 /// Parsed `s3://bucket/key` URI.
 ///
@@ -104,6 +115,114 @@ impl S3Client {
             .await
             .map_err(|e| s3_err(e, bucket, key))?;
         Ok(())
+    }
+
+    /// Upload, automatically using multipart for large payloads.
+    ///
+    /// Switches to multipart when `body.len() > MULTIPART_THRESHOLD`. On
+    /// failure mid-upload, the in-flight upload is best-effort aborted so we
+    /// don't leak charges from orphaned parts (S3 retains parts until
+    /// `AbortMultipartUpload` or the bucket lifecycle policy reaps them).
+    pub async fn put_multipart(&self, bucket: &str, key: &str, body: Bytes) -> Result<()> {
+        if body.len() <= MULTIPART_THRESHOLD {
+            return self.put(bucket, key, body).await;
+        }
+        self.put_multipart_with_part_size(bucket, key, body, MULTIPART_PART_SIZE)
+            .await
+    }
+
+    async fn put_multipart_with_part_size(
+        &self,
+        bucket: &str,
+        key: &str,
+        body: Bytes,
+        part_size: usize,
+    ) -> Result<()> {
+        assert!(part_size > 0, "part_size must be > 0");
+
+        let create = self
+            .inner
+            .create_multipart_upload()
+            .bucket(bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|e| s3_err(e, bucket, key))?;
+        let upload_id = create
+            .upload_id()
+            .ok_or_else(|| Error::S3("create_multipart_upload returned no upload_id".into()))?
+            .to_string();
+
+        match self
+            .upload_parts(bucket, key, &upload_id, body, part_size)
+            .await
+        {
+            Ok(parts) => {
+                let completed = CompletedMultipartUpload::builder()
+                    .set_parts(Some(parts))
+                    .build();
+                self.inner
+                    .complete_multipart_upload()
+                    .bucket(bucket)
+                    .key(key)
+                    .upload_id(&upload_id)
+                    .multipart_upload(completed)
+                    .send()
+                    .await
+                    .map_err(|e| s3_err(e, bucket, key))?;
+                Ok(())
+            }
+            Err(err) => {
+                // Best-effort abort; surface the original error either way.
+                let _ = self
+                    .inner
+                    .abort_multipart_upload()
+                    .bucket(bucket)
+                    .key(key)
+                    .upload_id(&upload_id)
+                    .send()
+                    .await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn upload_parts(
+        &self,
+        bucket: &str,
+        key: &str,
+        upload_id: &str,
+        body: Bytes,
+        part_size: usize,
+    ) -> Result<Vec<CompletedPart>> {
+        let mut parts = Vec::new();
+        let total = body.len();
+        let mut offset = 0usize;
+        let mut part_number: i32 = 1;
+        while offset < total {
+            let end = (offset + part_size).min(total);
+            let slice = body.slice(offset..end);
+            let resp = self
+                .inner
+                .upload_part()
+                .bucket(bucket)
+                .key(key)
+                .upload_id(upload_id)
+                .part_number(part_number)
+                .body(ByteStream::from(slice))
+                .send()
+                .await
+                .map_err(|e| s3_err(e, bucket, key))?;
+            parts.push(
+                CompletedPart::builder()
+                    .part_number(part_number)
+                    .set_e_tag(resp.e_tag().map(str::to_string))
+                    .build(),
+            );
+            offset = end;
+            part_number += 1;
+        }
+        Ok(parts)
     }
 
     /// Conditional create: succeeds only if the object does not already exist.

@@ -15,9 +15,11 @@
 
 mod local;
 mod memory;
+mod s3_store;
 
 pub use local::LocalStore;
 pub use memory::MemoryStore;
+pub use s3_store::S3Store;
 
 use async_trait::async_trait;
 use bytes::Bytes;
