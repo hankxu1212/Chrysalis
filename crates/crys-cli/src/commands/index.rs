@@ -8,7 +8,7 @@ use crys_core::status::status;
 
 use crate::commands::cwd;
 use crate::error::CliError;
-use crate::output::{print_log_entry, print_status};
+use crate::output::{print_log, print_status, LogStyle};
 use crate::progress::{print_progress_summary, ProgressBundle};
 
 pub async fn add(paths: Vec<PathBuf>) -> Result<(), CliError> {
@@ -60,15 +60,27 @@ pub async fn status_cmd() -> Result<(), CliError> {
     Ok(())
 }
 
-pub async fn log_cmd(limit: Option<usize>) -> Result<(), CliError> {
-    tracing::info!(limit = ?limit, "log: starting");
+pub async fn log_cmd(
+    limit: Option<usize>,
+    graph: bool,
+    oneline: bool,
+) -> Result<(), CliError> {
+    tracing::info!(limit = ?limit, graph, oneline, "log: starting");
     let cwd = cwd()?;
     let repo = Repo::open(&cwd).await.map_err(CliError::from)?;
     tracing::info!(crys_dir = %repo.crys_dir().display(), "log: repo opened");
     let store = repo.store().await.map_err(CliError::from)?;
     let entries = log(&repo, &store, limit).await.map_err(CliError::from)?;
     tracing::info!(count = entries.len(), "log: entries gathered");
-    print_log_entry(&entries);
+    let head = repo.head().await.map_err(CliError::from)?;
+    let remote_head = repo.remote_head().await.map_err(CliError::from)?;
+    // `--graph` implies one-line; otherwise honor `--oneline` as written.
+    let style = match (graph, oneline) {
+        (true, _) => LogStyle::Graph,
+        (false, true) => LogStyle::Oneline,
+        (false, false) => LogStyle::Default,
+    };
+    print_log(&entries, head.as_ref(), remote_head.as_ref(), style);
     Ok(())
 }
 

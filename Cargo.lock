@@ -882,6 +882,7 @@ name = "crys-cli"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "console",
  "crys-core",

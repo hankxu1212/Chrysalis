@@ -60,7 +60,11 @@ async fn async_main() -> Result<(), CliError> {
         Command::Add { paths } => commands::index::add(paths).await,
         Command::Commit { message, author } => commands::index::commit(message, author).await,
         Command::Status {} => commands::index::status_cmd().await,
-        Command::Log { limit } => commands::index::log_cmd(limit).await,
+        Command::Log {
+            limit,
+            graph,
+            oneline,
+        } => commands::index::log_cmd(limit, graph, oneline).await,
         Command::Clean { dry_run } => commands::index::clean(dry_run).await,
         Command::Gc { dry_run } => commands::index::gc(dry_run).await,
         Command::Reset { commit, soft, hard } => {

@@ -77,6 +77,16 @@ pub enum Command {
         /// Cap output to N most-recent commits.
         #[arg(short = 'n', long)]
         limit: Option<usize>,
+        /// Render a graph column alongside one-line entries.
+        /// Chrysalis history is linear, so the column is always a single `*`,
+        /// but ref decorations and short timestamps make this the practical
+        /// browsing format.
+        #[arg(long)]
+        graph: bool,
+        /// One-line per commit (short hash, decoration, message, age, author).
+        /// Implied by `--graph`.
+        #[arg(long)]
+        oneline: bool,
     },
     /// Remove files in the working tree that aren't tracked in the index.
     /// Honors `.crysignore`.
