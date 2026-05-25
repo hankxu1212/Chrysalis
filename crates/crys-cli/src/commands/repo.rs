@@ -93,11 +93,9 @@ pub async fn clone(
         region = ?resolved.region,
         "clone: building S3 client"
     );
-    let client = S3Client::with_profile_and_region(
-        resolved.profile.as_deref(),
-        resolved.region.as_deref(),
-    )
-    .await;
+    let client =
+        S3Client::with_profile_and_region(resolved.profile.as_deref(), resolved.region.as_deref())
+            .await;
     let remote = S3Store::new(client, uri);
     let progress = ProgressBundle::new();
     tracing::info!("clone: starting clone_with_progress");
@@ -134,11 +132,9 @@ pub async fn tree(
     let global = global_config::load().await.map_err(CliError::from)?;
     let resolved =
         global_config::resolve_aws(profile.as_deref(), region.as_deref(), None, None, &global);
-    let client = S3Client::with_profile_and_region(
-        resolved.profile.as_deref(),
-        resolved.region.as_deref(),
-    )
-    .await;
+    let client =
+        S3Client::with_profile_and_region(resolved.profile.as_deref(), resolved.region.as_deref())
+            .await;
 
     // Treat the absence of `config.json` as "this prefix isn't a crys repo".
     // `init_remote` writes config.json first, so its presence is the canonical
@@ -149,7 +145,11 @@ pub async fn tree(
     } else {
         format!("{prefix}/config.json")
     };
-    if !client.head(&uri.bucket, &config_key).await.map_err(CliError::from)? {
+    if !client
+        .head(&uri.bucket, &config_key)
+        .await
+        .map_err(CliError::from)?
+    {
         return Err(CliError::User(format!(
             "not a chrysalis repository: s3://{}/{}",
             uri.bucket, prefix
@@ -184,13 +184,11 @@ fn style_file_name(name: &str) -> String {
     match ext.as_deref() {
         // Heavyweight binaries: model weights, datasets, archives, media.
         Some(
-            "ckpt" | "safetensors" | "pt" | "pth" | "onnx" | "h5" | "npz" | "npy"
-            | "parquet" | "arrow" | "feather"
-            | "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "zst" | "7z"
-            | "iso" | "img" | "bin" | "dat"
-            | "mp4" | "mov" | "mkv" | "webm" | "avi"
-            | "wav" | "flac" | "aif" | "aiff" | "psd" | "tif" | "tiff" | "exr" | "blend"
-            | "fbx" | "obj" | "glb" | "gltf",
+            "ckpt" | "safetensors" | "pt" | "pth" | "onnx" | "h5" | "npz" | "npy" | "parquet"
+            | "arrow" | "feather" | "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "zst" | "7z"
+            | "iso" | "img" | "bin" | "dat" | "mp4" | "mov" | "mkv" | "webm" | "avi" | "wav"
+            | "flac" | "aif" | "aiff" | "psd" | "tif" | "tiff" | "exr" | "blend" | "fbx" | "obj"
+            | "glb" | "gltf",
         ) => style(name).magenta().bold().to_string(),
         // Common images: visible but not screaming.
         Some("png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg") => {
@@ -252,5 +250,3 @@ async fn print_tree(store: &S3Store, root: &Hash) -> Result<(), CliError> {
     }
     Ok(())
 }
-
-

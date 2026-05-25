@@ -131,7 +131,10 @@ mod tests {
         let before = store.list().await.unwrap().len();
         let report = gc(&repo, &store, false).await.unwrap();
         let after = store.list().await.unwrap().len();
-        assert!(report.removed.is_empty(), "nothing reachable should be GC'd");
+        assert!(
+            report.removed.is_empty(),
+            "nothing reachable should be GC'd"
+        );
         assert_eq!(before, after);
     }
 
@@ -187,6 +190,10 @@ mod tests {
         let before = store.list().await.unwrap().len();
         let report = gc(&repo, &store, true).await.unwrap();
         assert!(!report.removed.is_empty());
-        assert_eq!(before, store.list().await.unwrap().len(), "dry run must not delete");
+        assert_eq!(
+            before,
+            store.list().await.unwrap().len(),
+            "dry run must not delete"
+        );
     }
 }

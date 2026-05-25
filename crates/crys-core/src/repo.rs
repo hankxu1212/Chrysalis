@@ -121,13 +121,12 @@ impl Repo {
         if crys_dir.exists() {
             return Err(Error::RepoExists(crys_dir.display().to_string()));
         }
-        fs::create_dir_all(&crys_dir).await.map_err(|e| {
+        fs::create_dir_all(&crys_dir).await.inspect_err(|e| {
             tracing::info!(
                 kind = ?e.kind(),
                 raw_os_error = ?e.raw_os_error(),
                 "init_with: create_dir_all failed"
             );
-            e
         })?;
 
         let config = Config {

@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use crys_core::sync::{Progress,ProgressHandle};
+use crys_core::sync::{Progress, ProgressHandle};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 
 /// CLI progress reporter. Renders one progress bar per phase (chunks → files

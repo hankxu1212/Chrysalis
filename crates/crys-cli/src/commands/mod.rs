@@ -38,11 +38,9 @@ pub(crate) async fn open_repo_and_remote() -> Result<(Repo, S3Store), CliError> 
         region = ?resolved.region,
         "open_repo_and_remote: building S3 client"
     );
-    let client = S3Client::with_profile_and_region(
-        resolved.profile.as_deref(),
-        resolved.region.as_deref(),
-    )
-    .await;
+    let client =
+        S3Client::with_profile_and_region(resolved.profile.as_deref(), resolved.region.as_deref())
+            .await;
     Ok((repo, S3Store::new(client, uri)))
 }
 

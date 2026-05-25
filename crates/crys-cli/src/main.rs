@@ -67,9 +67,7 @@ async fn async_main() -> Result<(), CliError> {
         } => commands::index::log_cmd(limit, graph, oneline).await,
         Command::Clean { dry_run } => commands::index::clean(dry_run).await,
         Command::Gc { dry_run } => commands::index::gc(dry_run).await,
-        Command::Reset { commit, soft, hard } => {
-            commands::index::reset(commit, soft, hard).await
-        }
+        Command::Reset { commit, soft, hard } => commands::index::reset(commit, soft, hard).await,
         Command::Fetch {} => commands::sync::fetch().await,
         Command::Push {} => commands::sync::push().await,
         Command::Pull {} => commands::sync::pull().await,

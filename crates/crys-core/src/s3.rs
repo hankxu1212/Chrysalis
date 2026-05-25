@@ -288,10 +288,7 @@ impl S3Client {
             .send()
             .await;
         match result {
-            Ok(resp) => Ok(resp
-                .e_tag()
-                .map(str::to_string)
-                .unwrap_or_default()),
+            Ok(resp) => Ok(resp.e_tag().map(str::to_string).unwrap_or_default()),
             Err(e) => {
                 if let SdkError::ServiceError(svc) = &e {
                     if svc.raw().status().as_u16() == 412 {
@@ -308,12 +305,7 @@ impl S3Client {
 
     /// Conditional create with ETag returned. Wraps [`put_if_absent`] but
     /// surfaces the new ETag so callers can chain a later `put_if_match`.
-    pub async fn put_if_absent_etag(
-        &self,
-        bucket: &str,
-        key: &str,
-        body: Bytes,
-    ) -> Result<String> {
+    pub async fn put_if_absent_etag(&self, bucket: &str, key: &str, body: Bytes) -> Result<String> {
         let result = self
             .inner
             .put_object()
@@ -324,10 +316,7 @@ impl S3Client {
             .send()
             .await;
         match result {
-            Ok(resp) => Ok(resp
-                .e_tag()
-                .map(str::to_string)
-                .unwrap_or_default()),
+            Ok(resp) => Ok(resp.e_tag().map(str::to_string).unwrap_or_default()),
             Err(e) => {
                 if let SdkError::ServiceError(svc) = &e {
                     if svc.raw().status().as_u16() == 412 {
@@ -344,18 +333,8 @@ impl S3Client {
 
     /// Like [`get`], but also returns the object's ETag for later
     /// `put_if_match` calls. Returns `Ok(None)` if the object is absent.
-    pub async fn get_with_etag(
-        &self,
-        bucket: &str,
-        key: &str,
-    ) -> Result<Option<(Bytes, String)>> {
-        let resp = self
-            .inner
-            .get_object()
-            .bucket(bucket)
-            .key(key)
-            .send()
-            .await;
+    pub async fn get_with_etag(&self, bucket: &str, key: &str) -> Result<Option<(Bytes, String)>> {
+        let resp = self.inner.get_object().bucket(bucket).key(key).send().await;
         let resp = match resp {
             Ok(r) => r,
             Err(e) => {

@@ -488,7 +488,6 @@ async fn push_once<R: ObjectStore>(
     Ok(Some(local_tip))
 }
 
-
 /// `crys pull` (design §8). Fetches, enforces fast-forward, downloads any
 /// missing chunks for the new tip's tree, materializes the working tree,
 /// advances `HEAD`.

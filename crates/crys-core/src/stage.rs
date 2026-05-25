@@ -774,7 +774,9 @@ mod tests {
 
         // Soft reset to c1 — HEAD moves back, index/working tree untouched.
         let index_before = repo.read_index().await.unwrap();
-        reset(&repo, &store, Some(&c1), ResetMode::Soft).await.unwrap();
+        reset(&repo, &store, Some(&c1), ResetMode::Soft)
+            .await
+            .unwrap();
         assert_eq!(repo.head().await.unwrap(), Some(c1));
         let index_after = repo.read_index().await.unwrap();
         assert_eq!(
@@ -794,7 +796,9 @@ mod tests {
         // Modify the file but don't commit.
         write_file(dir.path(), "a.txt", b"v2-uncommitted");
 
-        reset(&repo, &store, Some(&c1), ResetMode::Hard).await.unwrap();
+        reset(&repo, &store, Some(&c1), ResetMode::Hard)
+            .await
+            .unwrap();
         assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"v1");
         assert_eq!(repo.head().await.unwrap(), Some(c1));
     }

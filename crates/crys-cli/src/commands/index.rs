@@ -38,8 +38,8 @@ pub async fn commit(message: String, author: Option<String>) -> Result<(), CliEr
     let repo = Repo::open(&cwd).await.map_err(CliError::from)?;
     tracing::info!(crys_dir = %repo.crys_dir().display(), "commit: repo opened");
     let store = repo.store().await.map_err(CliError::from)?;
-    let author = author
-        .unwrap_or_else(|| std::env::var("USER").unwrap_or_else(|_| "unknown".to_string()));
+    let author =
+        author.unwrap_or_else(|| std::env::var("USER").unwrap_or_else(|_| "unknown".to_string()));
     tracing::info!(author = %author, "commit: writing commit");
     let hash = stage::commit(&repo, &store, &author, &message)
         .await
@@ -60,11 +60,7 @@ pub async fn status_cmd() -> Result<(), CliError> {
     Ok(())
 }
 
-pub async fn log_cmd(
-    limit: Option<usize>,
-    graph: bool,
-    oneline: bool,
-) -> Result<(), CliError> {
+pub async fn log_cmd(limit: Option<usize>, graph: bool, oneline: bool) -> Result<(), CliError> {
     tracing::info!(limit = ?limit, graph, oneline, "log: starting");
     let cwd = cwd()?;
     let repo = Repo::open(&cwd).await.map_err(CliError::from)?;
@@ -130,7 +126,11 @@ pub async fn gc(dry_run: bool) -> Result<(), CliError> {
     let report = crys_core::gc::gc(&repo, &store, dry_run)
         .await
         .map_err(CliError::from)?;
-    tracing::info!(removed = report.removed.len(), kept = report.kept, "gc: complete");
+    tracing::info!(
+        removed = report.removed.len(),
+        kept = report.kept,
+        "gc: complete"
+    );
     if report.removed.is_empty() {
         println!("nothing to collect ({} live)", report.kept);
     } else {
