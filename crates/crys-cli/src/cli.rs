@@ -1,0 +1,125 @@
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand};
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "crys",
+    about = "Chrysalis: S3-backed file sharing with Git-like semantics.",
+    version = env!("CARGO_PKG_VERSION"),
+)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Command,
+
+    #[arg(short, long, global = true)]
+    pub verbose: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Initialize a new Chrysalis repository in the current directory.
+    Init {
+        /// Remote S3 URI, e.g. `s3://my-bucket/path/to/repo`.
+        s3_uri: String,
+
+        /// Skip the S3 round-trip. The remote will need to be initialized later.
+        #[arg(long)]
+        local_only: bool,
+
+        /// Pin an AWS profile in `.crys/config` so future commands don't
+        /// need `AWS_PROFILE`.
+        #[arg(long)]
+        profile: Option<String>,
+
+        /// Pin an AWS region in `.crys/config`.
+        #[arg(long)]
+        region: Option<String>,
+    },
+    /// Stage paths into the index.
+    Add {
+        /// Files or directories to stage. Walks recursively, honoring `.crysignore`.
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+    },
+    /// Record the index as a new commit.
+    Commit {
+        /// Commit message.
+        #[arg(short, long)]
+        message: String,
+        /// Author string. Defaults to `$USER` or `unknown`.
+        #[arg(long)]
+        author: Option<String>,
+    },
+    /// Refresh REMOTE_HEAD and download metadata for any new commits.
+    Fetch {},
+    /// Fetch then fast-forward the working tree to the remote tip.
+    Pull {},
+    /// Upload local commits to the remote (fast-forward only).
+    Push {},
+    /// Materialize a remote repository into a new local directory.
+    Clone {
+        /// Remote S3 URI to clone from.
+        s3_uri: String,
+        /// Destination directory. Defaults to the last path segment of the URI.
+        dest: Option<PathBuf>,
+        /// Pin an AWS profile in the cloned repo's `.crys/config`.
+        #[arg(long)]
+        profile: Option<String>,
+        /// Pin an AWS region in the cloned repo's `.crys/config`.
+        #[arg(long)]
+        region: Option<String>,
+    },
+    /// Show the working tree status.
+    Status {},
+    /// List commit history newest-first.
+    Log {
+        /// Cap output to N most-recent commits.
+        #[arg(short = 'n', long)]
+        limit: Option<usize>,
+    },
+    /// Remove files in the working tree that aren't tracked in the index.
+    /// Honors `.crysignore`.
+    Clean {
+        /// Show what would be removed without deleting anything.
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+    },
+    /// Read or write Chrysalis config (per-repo or global).
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigAction {
+    /// Show all values in scope (global merged with repo if inside one).
+    Show {
+        /// Show global config only.
+        #[arg(long)]
+        global: bool,
+    },
+    /// Get one value. Keys: `aws_profile`, `region`, `default_profile`,
+    /// `default_region`, `remote`.
+    Get {
+        key: String,
+        /// Read from global config instead of the per-repo config.
+        #[arg(long)]
+        global: bool,
+    },
+    /// Set one value. Same keys as `get`.
+    Set {
+        key: String,
+        value: String,
+        /// Write to global config instead of the per-repo config.
+        #[arg(long)]
+        global: bool,
+    },
+    /// Unset (clear) one value.
+    Unset {
+        key: String,
+        #[arg(long)]
+        global: bool,
+    },
+}

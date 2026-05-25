@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Build and install the `crys` binary.
+#   ./run dev      — debug build, install to ~/.cargo/bin/crys
+#   ./run release  — release build, install to ~/.cargo/bin/crys
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+mode="${1:-dev}"
+case "$mode" in
+    dev)
+        cargo build -p crys-cli
+        cargo install --path crates/crys-cli --debug --force
+        ;;
+    release)
+        cargo build -p crys-cli --release
+        cargo install --path crates/crys-cli --force
+        ;;
+    *)
+        echo "usage: $0 {dev|release}" >&2
+        exit 1
+        ;;
+esac
