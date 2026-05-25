@@ -1,3 +1,4 @@
+use console::style;
 use crys_core::global_config::GlobalConfig;
 use crys_core::log::LogEntry;
 use crys_core::repo::Repo;
@@ -69,7 +70,7 @@ pub fn print_status(s: &Status) {
         println!("Changes to be committed:");
         println!("  (use `crys commit -m <msg>` to record)");
         for (path, change) in &s.staged {
-            println!("\t{:<10} {}", label(change), path);
+            println!("\t{}", style(format!("{:<10} {}", label(change), path)).green());
         }
     }
 
@@ -78,7 +79,7 @@ pub fn print_status(s: &Status) {
         println!("Changes not staged for commit:");
         println!("  (use `crys add <path>` to update what will be committed)");
         for (path, change) in &s.unstaged {
-            println!("\t{:<10} {}", label(change), path);
+            println!("\t{}", style(format!("{:<10} {}", label(change), path)).red());
         }
     }
 
@@ -87,7 +88,7 @@ pub fn print_status(s: &Status) {
         println!("Untracked files:");
         println!("  (use `crys add <path>` to include)");
         for path in &s.untracked {
-            println!("\t{path}");
+            println!("\t{}", style(path).red());
         }
     }
 }

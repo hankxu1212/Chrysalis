@@ -62,6 +62,9 @@ async fn async_main() -> Result<(), CliError> {
         Command::Status {} => commands::index::status_cmd().await,
         Command::Log { limit } => commands::index::log_cmd(limit).await,
         Command::Clean { dry_run } => commands::index::clean(dry_run).await,
+        Command::Reset { commit, soft, hard } => {
+            commands::index::reset(commit, soft, hard).await
+        }
         Command::Fetch {} => commands::sync::fetch().await,
         Command::Push {} => commands::sync::push().await,
         Command::Pull {} => commands::sync::pull().await,

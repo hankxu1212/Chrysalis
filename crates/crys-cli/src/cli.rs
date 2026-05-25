@@ -90,6 +90,20 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Move HEAD and (optionally) reset the index / working tree.
+    /// Default mode rebuilds the index from the target commit's tree
+    /// (i.e. unstages changes) without touching the working tree.
+    Reset {
+        /// Target commit hash. Defaults to current HEAD.
+        commit: Option<String>,
+        /// Move HEAD only; leave the index and working tree alone.
+        #[arg(long, conflicts_with = "hard")]
+        soft: bool,
+        /// Move HEAD, rebuild the index, and overwrite the working tree.
+        /// DESTROYS uncommitted local changes to tracked files.
+        #[arg(long)]
+        hard: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

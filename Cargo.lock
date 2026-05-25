@@ -883,6 +883,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "console",
  "crys-core",
  "indicatif",
  "tokio",

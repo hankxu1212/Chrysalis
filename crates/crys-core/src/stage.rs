@@ -294,6 +294,80 @@ async fn parent_tree_hash<S: ObjectStore>(store: &S, commit_hash: &Hash) -> Resu
     Ok(body.tree)
 }
 
+/// Three modes of `crys reset`, mirroring git semantics.
+#[derive(Debug, Clone, Copy)]
+pub enum ResetMode {
+    /// Move HEAD only. Index and working tree are untouched.
+    Soft,
+    /// Move HEAD and rebuild the index from the target commit's tree.
+    /// Working tree is left alone — this is what unstages files.
+    Mixed,
+    /// Move HEAD, rebuild the index, *and* overwrite the working tree
+    /// with the target commit's tree.
+    Hard,
+}
+
+/// `crys reset`. `target` is the commit to move HEAD to; `None` means HEAD
+/// itself (used by the common "unstage everything" invocation).
+pub async fn reset<S: ObjectStore>(
+    repo: &Repo,
+    store: &S,
+    target: Option<&Hash>,
+    mode: ResetMode,
+) -> Result<Option<Hash>> {
+    // Resolve target: explicit hash, or current HEAD (which may be None on a
+    // fresh repo). A `None` target on a repo with no commits is allowed for
+    // mixed/hard — it just empties the index/working tree.
+    let head = repo.head().await?;
+    let target = match target {
+        Some(h) => Some(h.clone()),
+        None => head.clone(),
+    };
+
+    if matches!(mode, ResetMode::Soft) {
+        // Soft just moves HEAD; refuse if target is missing entirely since
+        // there's nothing to move to.
+        if let Some(h) = &target {
+            repo.set_head(Some(h)).await?;
+        } else {
+            repo.set_head(None).await?;
+        }
+        return Ok(target);
+    }
+
+    // Mixed and hard both rebuild the index from the target's tree (or empty
+    // if target is None).
+    let new_index = match &target {
+        Some(h) => {
+            let bytes = store.get(h).await?;
+            let body = CommitBody::from_storage_bytes(&bytes)?;
+            rebuild_index_from_tree(store, &body.tree, repo.workdir()).await?
+        }
+        None => IndexFile::default(),
+    };
+
+    if matches!(mode, ResetMode::Hard) {
+        // Wipe tracked files in the *current* working tree before checking
+        // out the target. We don't sweep untracked files (that's `crys clean`).
+        let current_index = repo.read_index().await?;
+        for path in current_index.entries.keys() {
+            let abs = repo.workdir().join(path);
+            if abs.exists() {
+                let _ = std::fs::remove_file(&abs);
+            }
+        }
+        if let Some(h) = &target {
+            let bytes = store.get(h).await?;
+            let body = CommitBody::from_storage_bytes(&bytes)?;
+            checkout_tree(store, &body.tree, repo.workdir()).await?;
+        }
+    }
+
+    repo.write_index(&new_index).await?;
+    repo.set_head(target.as_ref()).await?;
+    Ok(target)
+}
+
 pub(crate) fn posix_path(p: &Path) -> String {
     let mut parts = Vec::new();
     for component in p.components() {
@@ -572,6 +646,68 @@ mod tests {
         let index = repo.read_index().await.unwrap();
         assert!(!index.entries.contains_key("a.txt"));
         assert!(index.entries.contains_key("b.txt"));
+    }
+
+    #[tokio::test]
+    async fn reset_mixed_unstages_changes_keeps_working_tree() {
+        let (dir, repo, store) = fresh_repo().await;
+        write_file(dir.path(), "a.txt", b"v1");
+        add(&repo, &store, dir.path()).await.unwrap();
+        commit(&repo, &store, "tester", "first").await.unwrap();
+
+        // Modify and stage the change; the index now diverges from HEAD's tree.
+        write_file(dir.path(), "a.txt", b"v2");
+        add(&repo, &store, dir.path()).await.unwrap();
+        let staged_hash = repo.read_index().await.unwrap().entries["a.txt"]
+            .file_hash
+            .clone();
+
+        reset(&repo, &store, None, ResetMode::Mixed).await.unwrap();
+
+        // Index reverted to HEAD's tree...
+        let after = repo.read_index().await.unwrap();
+        assert_ne!(after.entries["a.txt"].file_hash, staged_hash);
+        // ...but working tree still has the modified content.
+        assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"v2");
+    }
+
+    #[tokio::test]
+    async fn reset_soft_moves_head_only() {
+        let (dir, repo, store) = fresh_repo().await;
+        write_file(dir.path(), "a.txt", b"v1");
+        add(&repo, &store, dir.path()).await.unwrap();
+        let c1 = commit(&repo, &store, "tester", "first").await.unwrap();
+
+        write_file(dir.path(), "a.txt", b"v2");
+        add(&repo, &store, dir.path()).await.unwrap();
+        let c2 = commit(&repo, &store, "tester", "second").await.unwrap();
+        assert_eq!(repo.head().await.unwrap(), Some(c2));
+
+        // Soft reset to c1 — HEAD moves back, index/working tree untouched.
+        let index_before = repo.read_index().await.unwrap();
+        reset(&repo, &store, Some(&c1), ResetMode::Soft).await.unwrap();
+        assert_eq!(repo.head().await.unwrap(), Some(c1));
+        let index_after = repo.read_index().await.unwrap();
+        assert_eq!(
+            index_before.entries["a.txt"].file_hash,
+            index_after.entries["a.txt"].file_hash
+        );
+        assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"v2");
+    }
+
+    #[tokio::test]
+    async fn reset_hard_overwrites_working_tree() {
+        let (dir, repo, store) = fresh_repo().await;
+        write_file(dir.path(), "a.txt", b"v1");
+        add(&repo, &store, dir.path()).await.unwrap();
+        let c1 = commit(&repo, &store, "tester", "first").await.unwrap();
+
+        // Modify the file but don't commit.
+        write_file(dir.path(), "a.txt", b"v2-uncommitted");
+
+        reset(&repo, &store, Some(&c1), ResetMode::Hard).await.unwrap();
+        assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"v1");
+        assert_eq!(repo.head().await.unwrap(), Some(c1));
     }
 
     #[tokio::test]
