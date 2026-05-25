@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use super::ObjectStore;
+use super::{HeadToken, ObjectStore};
 use crate::{Error, Hash, Result};
 
 #[derive(Default)]
@@ -61,6 +61,35 @@ impl ObjectStore for MemoryStore {
         *self.head.lock().unwrap() = head.cloned();
         Ok(())
     }
+
+    async fn get_head_with_token(&self) -> Result<(Option<Hash>, HeadToken)> {
+        let head = self.head.lock().unwrap().clone();
+        Ok((head.clone(), token_for(head.as_ref())))
+    }
+
+    async fn compare_and_set_head(
+        &self,
+        expected: &HeadToken,
+        new: Option<&Hash>,
+    ) -> Result<HeadToken> {
+        let mut guard = self.head.lock().unwrap();
+        let current_token = token_for(guard.as_ref());
+        if &current_token != expected {
+            return Err(Error::PreconditionFailed {
+                bucket: "memory".into(),
+                key: "HEAD".into(),
+            });
+        }
+        *guard = new.cloned();
+        Ok(token_for(new))
+    }
+}
+
+fn token_for(head: Option<&Hash>) -> HeadToken {
+    match head {
+        Some(h) => HeadToken::new(h.as_hex().to_string()),
+        None => HeadToken::absent(),
+    }
 }
 
 #[cfg(test)]
@@ -77,5 +106,7 @@ mod tests {
         crate::store::conformance::list_returns_all_keys(&store).await;
         let store = MemoryStore::new();
         crate::store::conformance::head_round_trip(&store).await;
+        let store = MemoryStore::new();
+        crate::store::conformance::cas_head_serializes_writers(&store).await;
     }
 }

@@ -13,7 +13,7 @@ use bytes::Bytes;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
-use super::ObjectStore;
+use super::{HeadToken, ObjectStore};
 use crate::{Error, Hash, Result};
 
 const HEAD_FILE: &str = "HEAD";
@@ -137,6 +137,38 @@ impl ObjectStore for LocalStore {
             .unwrap_or_default();
         atomic_write(&path, &bytes).await
     }
+
+    async fn get_head_with_token(&self) -> Result<(Option<Hash>, HeadToken)> {
+        let head = self.get_head().await?;
+        Ok((head.clone(), local_token(head.as_ref())))
+    }
+
+    async fn compare_and_set_head(
+        &self,
+        expected: &HeadToken,
+        new: Option<&Hash>,
+    ) -> Result<HeadToken> {
+        // The local store is per-process; CAS is a courtesy for trait
+        // conformance and tests. Compare under the same `get_head` snapshot we
+        // immediately overwrite — racy across threads, but `LocalStore` is
+        // never shared between concurrent writers in practice.
+        let current = self.get_head().await?;
+        if local_token(current.as_ref()) != *expected {
+            return Err(Error::PreconditionFailed {
+                bucket: "local".into(),
+                key: "HEAD".into(),
+            });
+        }
+        self.put_head(new).await?;
+        Ok(local_token(new))
+    }
+}
+
+fn local_token(head: Option<&Hash>) -> HeadToken {
+    match head {
+        Some(h) => HeadToken::new(h.as_hex().to_string()),
+        None => HeadToken::absent(),
+    }
 }
 
 /// Write `bytes` to `path` atomically via tempfile + rename. The tempfile
@@ -192,6 +224,12 @@ mod tests {
     async fn head_round_trip() {
         let (_dir, store) = fresh().await;
         crate::store::conformance::head_round_trip(&store).await;
+    }
+
+    #[tokio::test]
+    async fn cas_head_serializes_writers() {
+        let (_dir, store) = fresh().await;
+        crate::store::conformance::cas_head_serializes_writers(&store).await;
     }
 
     #[tokio::test]

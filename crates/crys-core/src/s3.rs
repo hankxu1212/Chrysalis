@@ -268,6 +268,115 @@ impl S3Client {
         }
     }
 
+    /// Conditional overwrite: succeeds only if the object's current ETag
+    /// matches `if_match`. Returns [`Error::PreconditionFailed`] (HTTP 412)
+    /// otherwise. Used for CAS on the `HEAD` pointer during `crys push`.
+    pub async fn put_if_match(
+        &self,
+        bucket: &str,
+        key: &str,
+        if_match: &str,
+        body: Bytes,
+    ) -> Result<String> {
+        let result = self
+            .inner
+            .put_object()
+            .bucket(bucket)
+            .key(key)
+            .if_match(if_match)
+            .body(ByteStream::from(body))
+            .send()
+            .await;
+        match result {
+            Ok(resp) => Ok(resp
+                .e_tag()
+                .map(str::to_string)
+                .unwrap_or_default()),
+            Err(e) => {
+                if let SdkError::ServiceError(svc) = &e {
+                    if svc.raw().status().as_u16() == 412 {
+                        return Err(Error::PreconditionFailed {
+                            bucket: bucket.to_string(),
+                            key: key.to_string(),
+                        });
+                    }
+                }
+                Err(s3_err(e, bucket, key))
+            }
+        }
+    }
+
+    /// Conditional create with ETag returned. Wraps [`put_if_absent`] but
+    /// surfaces the new ETag so callers can chain a later `put_if_match`.
+    pub async fn put_if_absent_etag(
+        &self,
+        bucket: &str,
+        key: &str,
+        body: Bytes,
+    ) -> Result<String> {
+        let result = self
+            .inner
+            .put_object()
+            .bucket(bucket)
+            .key(key)
+            .if_none_match("*")
+            .body(ByteStream::from(body))
+            .send()
+            .await;
+        match result {
+            Ok(resp) => Ok(resp
+                .e_tag()
+                .map(str::to_string)
+                .unwrap_or_default()),
+            Err(e) => {
+                if let SdkError::ServiceError(svc) = &e {
+                    if svc.raw().status().as_u16() == 412 {
+                        return Err(Error::PreconditionFailed {
+                            bucket: bucket.to_string(),
+                            key: key.to_string(),
+                        });
+                    }
+                }
+                Err(s3_err(e, bucket, key))
+            }
+        }
+    }
+
+    /// Like [`get`], but also returns the object's ETag for later
+    /// `put_if_match` calls. Returns `Ok(None)` if the object is absent.
+    pub async fn get_with_etag(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<Option<(Bytes, String)>> {
+        let resp = self
+            .inner
+            .get_object()
+            .bucket(bucket)
+            .key(key)
+            .send()
+            .await;
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                if let SdkError::ServiceError(svc) = &e {
+                    if matches!(svc.err(), GetObjectError::NoSuchKey(_)) {
+                        return Ok(None);
+                    }
+                }
+                return Err(s3_err(e, bucket, key));
+            }
+        };
+        let etag = resp.e_tag().map(str::to_string).unwrap_or_default();
+        let bytes = resp
+            .body
+            .collect()
+            .await
+            .map_err(|e| Error::S3(format!("read body: {e}")))?
+            .into_bytes();
+        Ok(Some((bytes, etag)))
+    }
+
     /// Fetch `bucket/key` in full into memory.
     pub async fn get(&self, bucket: &str, key: &str) -> Result<Bytes> {
         let resp = self

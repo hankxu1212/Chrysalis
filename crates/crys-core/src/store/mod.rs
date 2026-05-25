@@ -26,6 +26,39 @@ use bytes::Bytes;
 
 use crate::{Hash, Result};
 
+/// Opaque versioning token for `HEAD`, used by [`ObjectStore::compare_and_set_head`]
+/// to make pushes serialize cleanly under concurrent writers.
+///
+/// For the S3 store this is the object's ETag; for in-process stores it's the
+/// hash hex (or empty when HEAD is absent). Callers must treat the value as
+/// opaque — only equality with what `get_head_with_token` returned matters.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HeadToken {
+    /// Empty string is the canonical "HEAD does not exist yet" token.
+    inner: String,
+}
+
+impl HeadToken {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self {
+            inner: value.into(),
+        }
+    }
+
+    /// The token used to assert "HEAD must be absent".
+    pub fn absent() -> Self {
+        Self::default()
+    }
+
+    pub fn is_absent(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.inner
+    }
+}
+
 /// Async store of content-addressed objects plus one mutable `HEAD` pointer.
 #[async_trait]
 pub trait ObjectStore: Send + Sync {
@@ -54,8 +87,25 @@ pub trait ObjectStore: Send + Sync {
     async fn get_head(&self) -> Result<Option<Hash>>;
 
     /// Overwrite `HEAD`. `None` writes an empty `HEAD` (the "no commits yet"
-    /// sentinel).
+    /// sentinel). Unconditional — last writer wins. Use
+    /// [`compare_and_set_head`] when concurrent writers must serialize.
     async fn put_head(&self, head: Option<&Hash>) -> Result<()>;
+
+    /// Read `HEAD` along with an opaque [`HeadToken`] suitable for a later
+    /// [`compare_and_set_head`] call. The token is the ETag on S3 and the hex
+    /// hash for local/memory stores. An absent HEAD returns
+    /// `(None, HeadToken::absent())`.
+    async fn get_head_with_token(&self) -> Result<(Option<Hash>, HeadToken)>;
+
+    /// Conditionally overwrite `HEAD`, succeeding only if the current HEAD's
+    /// token equals `expected`. Returns the new token on success, or
+    /// [`crate::Error::PreconditionFailed`] if another writer mutated HEAD
+    /// since `expected` was observed.
+    async fn compare_and_set_head(
+        &self,
+        expected: &HeadToken,
+        new: Option<&Hash>,
+    ) -> Result<HeadToken>;
 }
 
 /// Conformance test suite — call this from the impl-specific test modules.
@@ -116,5 +166,30 @@ pub(crate) mod conformance {
         // Clear back to empty.
         store.put_head(None).await.unwrap();
         assert!(store.get_head().await.unwrap().is_none());
+    }
+
+    pub async fn cas_head_serializes_writers<S: ObjectStore>(store: &S) {
+        // Initial state: HEAD absent. Both observers see the "absent" token.
+        let (head_a, tok_a) = store.get_head_with_token().await.unwrap();
+        let (head_b, tok_b) = store.get_head_with_token().await.unwrap();
+        assert!(head_a.is_none() && head_b.is_none());
+        assert_eq!(tok_a, tok_b);
+
+        // Writer A successfully claims HEAD.
+        let c1 = Hash::of(b"cas-c1");
+        let _new_tok = store.compare_and_set_head(&tok_a, Some(&c1)).await.unwrap();
+        assert_eq!(store.get_head().await.unwrap(), Some(c1.clone()));
+
+        // Writer B, still holding the stale "absent" token, must be rejected.
+        let c2 = Hash::of(b"cas-c2");
+        match store.compare_and_set_head(&tok_b, Some(&c2)).await {
+            Err(Error::PreconditionFailed { .. }) => {}
+            other => panic!("expected PreconditionFailed, got {other:?}"),
+        }
+
+        // Re-read for a fresh token, then a CAS succeeds.
+        let (_, fresh) = store.get_head_with_token().await.unwrap();
+        store.compare_and_set_head(&fresh, Some(&c2)).await.unwrap();
+        assert_eq!(store.get_head().await.unwrap(), Some(c2));
     }
 }

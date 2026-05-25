@@ -15,7 +15,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use super::ObjectStore;
+use super::{HeadToken, ObjectStore};
 use crate::s3::S3Client;
 use crate::{Error, Hash, Result, S3Uri};
 
@@ -147,6 +147,47 @@ impl ObjectStore for S3Store {
             .map(|h| Bytes::copy_from_slice(h.as_hex().as_bytes()))
             .unwrap_or_default();
         self.client.put(&self.bucket, &self.head_key(), bytes).await
+    }
+
+    async fn get_head_with_token(&self) -> Result<(Option<Hash>, HeadToken)> {
+        let key = self.head_key();
+        let Some((bytes, etag)) = self.client.get_with_etag(&self.bucket, &key).await? else {
+            return Ok((None, HeadToken::absent()));
+        };
+        let trimmed = std::str::from_utf8(&bytes)
+            .map_err(|_| Error::InvalidHash("HEAD is not utf-8".into()))?
+            .trim();
+        let head = if trimmed.is_empty() {
+            None
+        } else {
+            Some(Hash::from_hex(trimmed)?)
+        };
+        // S3's "no object yet" sentinel must be `HeadToken::absent()` so the
+        // CAS path knows to use `If-None-Match: *` instead of `If-Match`.
+        // An *empty-bytes* HEAD (legacy "no commits yet" sentinel) still has a
+        // valid ETag, so it stays as a normal token.
+        Ok((head, HeadToken::new(etag)))
+    }
+
+    async fn compare_and_set_head(
+        &self,
+        expected: &HeadToken,
+        new: Option<&Hash>,
+    ) -> Result<HeadToken> {
+        let key = self.head_key();
+        let bytes = new
+            .map(|h| Bytes::copy_from_slice(h.as_hex().as_bytes()))
+            .unwrap_or_default();
+        let new_etag = if expected.is_absent() {
+            self.client
+                .put_if_absent_etag(&self.bucket, &key, bytes)
+                .await?
+        } else {
+            self.client
+                .put_if_match(&self.bucket, &key, expected.as_str(), bytes)
+                .await?
+        };
+        Ok(HeadToken::new(new_etag))
     }
 }
 

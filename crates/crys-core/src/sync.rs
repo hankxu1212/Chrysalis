@@ -400,13 +400,42 @@ pub async fn fetch_with_progress<R: ObjectStore>(
 }
 
 /// `crys push` (design §8). Fetches first, enforces fast-forward, uploads
-/// the new portion of history in dependency order, then writes `HEAD`
-/// unconditionally.
+/// the new portion of history in dependency order, then advances HEAD via
+/// compare-and-swap so concurrent pushers serialize cleanly.
 pub async fn push<R: ObjectStore>(repo: &Repo, remote: &R) -> Result<Option<Hash>> {
     push_with_progress(repo, remote, &noop()).await
 }
 
+/// Maximum number of times `push_with_progress` will retry after losing the
+/// HEAD CAS to a concurrent pusher. Each retry refetches and rebuilds the
+/// upload set; uploads of already-present objects are skipped via `has`, so
+/// retries are cheap unless the racing push churned the chunk graph.
+const PUSH_CAS_RETRIES: usize = 3;
+
 pub async fn push_with_progress<R: ObjectStore>(
+    repo: &Repo,
+    remote: &R,
+    progress: &ProgressHandle,
+) -> Result<Option<Hash>> {
+    for attempt in 0..=PUSH_CAS_RETRIES {
+        match push_once(repo, remote, progress).await {
+            Ok(result) => return Ok(result),
+            Err(Error::PreconditionFailed { .. }) if attempt < PUSH_CAS_RETRIES => {
+                tracing::info!(
+                    attempt = attempt + 1,
+                    "push: HEAD CAS lost to concurrent pusher; retrying"
+                );
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    // All retries exhausted; surface the last race as NotFastForward since
+    // from the user's perspective the remote moved.
+    Err(Error::NotFastForward)
+}
+
+async fn push_once<R: ObjectStore>(
     repo: &Repo,
     remote: &R,
     progress: &ProgressHandle,
@@ -414,15 +443,17 @@ pub async fn push_with_progress<R: ObjectStore>(
     let local = repo.store().await?;
     fetch_with_progress(repo, remote, progress).await?;
 
-    let local_head = repo.head().await?;
-    let remote_head = repo.remote_head().await?;
+    // Snapshot the remote HEAD *and its CAS token* in one call so the final
+    // write can prove no other pusher slipped in between.
+    let (snapshot_head, head_token) = remote.get_head_with_token().await?;
 
+    let local_head = repo.head().await?;
     let local_tip = match local_head.clone() {
         Some(h) => h,
         None => return Ok(None),
     };
 
-    if let Some(rh) = &remote_head {
+    if let Some(rh) = &snapshot_head {
         if rh == &local_tip {
             return Ok(Some(local_tip));
         }
@@ -437,7 +468,7 @@ pub async fn push_with_progress<R: ObjectStore>(
         &local,
         &local_tip,
         WalkScope::Full,
-        remote_head.as_ref(),
+        snapshot_head.as_ref(),
         progress,
     )
     .await?;
@@ -447,11 +478,16 @@ pub async fn push_with_progress<R: ObjectStore>(
     copy_many(&local, remote, &set.trees, false, "trees", progress).await?;
     copy_many(&local, remote, &set.commits, false, "commits", progress).await?;
 
-    // Final unconditional HEAD write — last writer wins (design §10).
-    remote.put_head(Some(&local_tip)).await?;
+    // Conditional HEAD write keyed on the snapshot token. If a concurrent
+    // pusher advanced HEAD since `get_head_with_token`, this returns
+    // `PreconditionFailed` and the outer loop retries.
+    let _ = remote
+        .compare_and_set_head(&head_token, Some(&local_tip))
+        .await?;
     repo.set_remote_head(Some(&local_tip)).await?;
     Ok(Some(local_tip))
 }
+
 
 /// `crys pull` (design §8). Fetches, enforces fast-forward, downloads any
 /// missing chunks for the new tip's tree, materializes the working tree,
@@ -875,9 +911,10 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_push_is_last_write_wins() {
-        // Regression-locks design §10: v1 explicitly does NOT detect
-        // concurrent pushes. If this test ever flips to detecting them, that
-        // should be a deliberate change paired with a documentation update.
+        // Regression-locks the *primitive* `remote.put_head` semantics:
+        // unconditional, last-writer-wins. The high-level `push()` builds on
+        // top via CAS (`compare_and_set_head`) and *does* serialize concurrent
+        // pushers — see `push_serializes_concurrent_writers_via_cas` below.
         let dir_a = tempfile::tempdir().unwrap();
         let repo_a = Repo::init(dir_a.path(), "memory://shared").await.unwrap();
         let store_a = repo_a.store().await.unwrap();
@@ -924,6 +961,104 @@ mod tests {
             remote.has(&cx).await.unwrap(),
             "orphaned commit objects remain"
         );
+    }
+
+    #[tokio::test]
+    async fn push_serializes_concurrent_writers_via_cas() {
+        // Two pushers race past the fast-forward gate, then collide at the
+        // final HEAD CAS. The first to write wins; the second's CAS fails and
+        // its retry observes the now-advanced HEAD as a non-ancestor → returns
+        // NotFastForward.
+        //
+        // We simulate the race by manually walking both pushes up to the
+        // pre-CAS state, then writing HEAD ourselves to mimic pusher A having
+        // landed first, then letting pusher B's CAS rip.
+        let (dir_a, repo_a, remote) = fixture().await;
+        let store_a = repo_a.store().await.unwrap();
+        write_file(dir_a.path(), "f.txt", b"v0");
+        stage::add(&repo_a, &store_a, dir_a.path()).await.unwrap();
+        stage::commit(&repo_a, &store_a, "alice", "c0")
+            .await
+            .unwrap();
+        push(&repo_a, &remote).await.unwrap();
+
+        // Two clones diverge from the same tip.
+        let dir_x = tempfile::tempdir().unwrap();
+        let repo_x = clone_repo(&remote, "memory://shared", dir_x.path())
+            .await
+            .unwrap();
+        let store_x = repo_x.store().await.unwrap();
+        write_file(dir_x.path(), "f.txt", b"from-x");
+        stage::add(&repo_x, &store_x, dir_x.path()).await.unwrap();
+        let cx = stage::commit(&repo_x, &store_x, "x", "cx").await.unwrap();
+
+        let dir_y = tempfile::tempdir().unwrap();
+        let repo_y = clone_repo(&remote, "memory://shared", dir_y.path())
+            .await
+            .unwrap();
+        let store_y = repo_y.store().await.unwrap();
+        write_file(dir_y.path(), "f.txt", b"from-y");
+        stage::add(&repo_y, &store_y, dir_y.path()).await.unwrap();
+        let _cy = stage::commit(&repo_y, &store_y, "y", "cy").await.unwrap();
+
+        // X pushes successfully — HEAD now == cx with a fresh ETag.
+        push(&repo_x, &remote).await.unwrap();
+        assert_eq!(remote.get_head().await.unwrap(), Some(cx.clone()));
+
+        // Y's push must NOT silently clobber X. Because Y's REMOTE_HEAD is
+        // stale (still pointing at the original c0), Y's internal fetch will
+        // pull X's commit, the ancestor check will see X's commit isn't an
+        // ancestor of Y's tip, and we return NotFastForward.
+        let err = push(&repo_y, &remote).await.unwrap_err();
+        assert!(matches!(err, Error::NotFastForward), "got {err:?}");
+        assert_eq!(
+            remote.get_head().await.unwrap(),
+            Some(cx),
+            "Y must not have clobbered X's HEAD"
+        );
+    }
+
+    #[tokio::test]
+    async fn push_retries_on_lost_cas_then_fails_fast_forward() {
+        // Pusher loses the CAS to a third party that advanced HEAD between
+        // its fetch and final write. The retry refetches, discovers the new
+        // HEAD isn't an ancestor of its tip, and surfaces NotFastForward.
+        let (dir_a, repo_a, remote) = fixture().await;
+        let store_a = repo_a.store().await.unwrap();
+        write_file(dir_a.path(), "f.txt", b"v0");
+        stage::add(&repo_a, &store_a, dir_a.path()).await.unwrap();
+        stage::commit(&repo_a, &store_a, "alice", "c0")
+            .await
+            .unwrap();
+        push(&repo_a, &remote).await.unwrap();
+
+        // Clone and diverge.
+        let dir_b = tempfile::tempdir().unwrap();
+        let repo_b = clone_repo(&remote, "memory://shared", dir_b.path())
+            .await
+            .unwrap();
+        let store_b = repo_b.store().await.unwrap();
+        write_file(dir_b.path(), "f.txt", b"from-b");
+        stage::add(&repo_b, &store_b, dir_b.path()).await.unwrap();
+        stage::commit(&repo_b, &store_b, "bob", "cb").await.unwrap();
+
+        // Inject a foreign HEAD: a hash that exists in the remote but is on
+        // an unrelated chain. Easiest synthesis: a second commit on top of c0
+        // from repo_a, pushed by A directly to bump the ETag.
+        write_file(dir_a.path(), "f.txt", b"v1-from-a");
+        stage::add(&repo_a, &store_a, dir_a.path()).await.unwrap();
+        let c_a2 = stage::commit(&repo_a, &store_a, "alice", "c1")
+            .await
+            .unwrap();
+        push(&repo_a, &remote).await.unwrap();
+
+        // Now B (who only knows c0) attempts to push. Its fetch picks up
+        // c_a2; the ancestor check fails immediately (B's tip doesn't
+        // descend from c_a2). NotFastForward is returned without ever
+        // reaching the CAS.
+        let err = push(&repo_b, &remote).await.unwrap_err();
+        assert!(matches!(err, Error::NotFastForward), "got {err:?}");
+        assert_eq!(remote.get_head().await.unwrap(), Some(c_a2));
     }
 
     #[tokio::test]
