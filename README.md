@@ -8,9 +8,27 @@ There is no Chrysalis server. A "remote" is an S3 prefix; commits, trees,
 file content, and refs all live there as immutable objects plus one small
 mutable pointer (`HEAD`).
 
-See [docs/superpowers/specs/2026-05-24-chrysalis-design.md](docs/superpowers/specs/2026-05-24-chrysalis-design.md)
-for the full design and [docs/superpowers/specs/2026-05-24-chrysalis-tasks.md](docs/superpowers/specs/2026-05-24-chrysalis-tasks.md)
-for the implementation plan.
+## Motivation
+
+Chrysalis is a small project aimed at one specific gap: simple version
+control for directories full of multi-gigabyte binary blobs — datasets, ML
+checkpoints, game assets, renders, audio stems, scanned documents.
+
+Git assumes text. Git LFS bolts large-file storage onto Git but still needs
+a server (or a paid host) and a separate workflow. Dedicated VCS-for-data
+tools (DVC, lakeFS, etc.) bring their own services and concepts.
+
+For a solo user or small team that just wants "git, but the remote is a
+bucket I already pay for," all of those are heavy. **S3 is the cheapest
+durable storage you can rent**, scales to terabytes without a thought, and
+every cloud has an S3-compatible offering. Chrysalis treats an S3 prefix as
+the entire remote — no server to run, no service to subscribe to. You pay
+AWS for bytes-at-rest and bytes-out, and that's it.
+
+The trade-off is intentional: linear history, fast-forward-only pushes, no
+merges. If you want branches and rebases, use Git. If you want to share a
+60 GB folder of binary blobs with someone else and only ship the bytes that
+changed, this is for you.
 
 ## Install
 
@@ -50,16 +68,19 @@ AWS_PROFILE=chrysalis crys pull
 | Command | Behavior |
 |---|---|
 | `crys init <s3-uri>` | Initialize `.crys/` and bootstrap the remote (`config.json` + empty `HEAD`). `--local-only` skips the S3 round-trip. |
+| `crys clone <s3-uri> [dest]` | Materialize a remote repo into a new local directory. |
 | `crys add <paths...>` | Stage files into the index. Walks recursively, honoring `.crysignore`. |
 | `crys commit -m "<msg>"` | Record the index as a new commit. Refuses if the resulting tree matches `HEAD`. |
 | `crys status` | Show staged / unstaged / untracked changes (git-style). |
-| `crys log [-n N]` | List commit history newest-first. |
+| `crys log [-n N] [--graph] [--oneline]` | List commit history newest-first. `--graph` implies one-line entries with ref decorations. |
+| `crys reset [<commit>] [--soft \| --hard]` | Move `HEAD`. Default rebuilds the index from the target tree (unstages); `--soft` moves only `HEAD`; `--hard` also overwrites the working tree. |
 | `crys clean [-n]` | Remove untracked files. `-n` shows what would be removed. Honors `.crysignore`. |
-| `crys config show \| get \| set \| unset [--global] <key> [<value>]` | Read/write per-repo or global config. |
+| `crys gc [-n]` | Sweep unreachable objects from the local `.crys/objects/` cache. Live set = `HEAD` ∪ `REMOTE_HEAD` ∪ index. Does not touch the remote. |
 | `crys fetch` | Refresh `REMOTE_HEAD` and download metadata for any new commits (no chunks). |
 | `crys pull` | Fetch then fast-forward the working tree to the remote tip. Refuses if the working tree has uncommitted changes. |
-| `crys push` | Upload local commits to the remote (fast-forward only). |
-| `crys clone <s3-uri> [dest]` | Materialize a remote repo into a new local directory. |
+| `crys push` | Upload local commits to the remote (fast-forward only). Serializes concurrent pushers via a HEAD compare-and-swap. |
+| `crys tree <s3-uri>` | List the file tree of a remote repo at HEAD without cloning. |
+| `crys config show \| get \| set \| unset [--global] <key> [<value>]` | Read/write per-repo or global config. |
 
 ## Authentication
 
@@ -96,14 +117,14 @@ default chain.
 
 ## Known limitations (v1)
 
-- **No branches, merges, tags.** Linear history only.
-- **Last-write-wins push.** Two clients pushing different descendants of the
-  same `REMOTE_HEAD` race; the later writer's `HEAD` wins. Earlier client's
-  commit becomes orphaned. Conditional-write push to detect this is on the
-  v2 list.
-- **No GC.** Orphaned objects (after a push race or aborted commit) remain
-  in S3.
-- **No `status`/`log`/`diff`/`checkout` commands.**
+- **No branches, merges, tags.** Linear history only. Diverged work has to
+  be resolved by the user — typically `crys reset` to the common ancestor
+  and re-stage.
+- **No remote GC.** Push uses an S3 ETag compare-and-swap so concurrent
+  pushers serialize cleanly, but objects from a losing push (or any
+  abandoned history) remain in the bucket. `crys gc` only sweeps the local
+  cache. Remote sweeping is on the v2 list.
+- **No `diff` / `checkout` / `revert` commands.**
 - **Fixed-size chunking.** Inserts in the middle of a large binary
   invalidate every downstream chunk. Content-defined chunking is on the v2
   list.

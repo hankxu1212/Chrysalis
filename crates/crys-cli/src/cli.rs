@@ -100,6 +100,17 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// List the file tree of a remote Chrysalis repo at HEAD without cloning.
+    Tree {
+        /// Remote S3 URI, e.g. `s3://my-bucket/path/to/repo`.
+        s3_uri: String,
+        /// AWS profile override (otherwise resolved from global config / env).
+        #[arg(long)]
+        profile: Option<String>,
+        /// AWS region override.
+        #[arg(long)]
+        region: Option<String>,
+    },
     /// Sweep unreachable objects from the local `.crys/objects/` cache.
     /// Live set = HEAD ∪ REMOTE_HEAD ∪ everything currently in the index.
     /// Does not touch the remote.

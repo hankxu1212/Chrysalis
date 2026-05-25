@@ -80,5 +80,10 @@ async fn async_main() -> Result<(), CliError> {
             region,
         } => commands::repo::clone(s3_uri, dest, profile, region).await,
         Command::Config { action } => commands::config::run(action).await,
+        Command::Tree {
+            s3_uri,
+            profile,
+            region,
+        } => commands::repo::tree(s3_uri, profile, region).await,
     }
 }
