@@ -21,6 +21,8 @@ pub struct IndicatifState {
     bytes: std::collections::HashMap<String, u64>,
     /// Total objects copied per phase.
     counts: std::collections::HashMap<String, u64>,
+    /// Optional label per phase (e.g., the path currently being staged).
+    labels: std::collections::HashMap<String, String>,
 }
 
 impl IndicatifProgress {
@@ -88,13 +90,17 @@ impl Progress for IndicatifProgress {
         *state.bytes.entry(kind.to_string()).or_insert(0) += bytes;
         *state.counts.entry(kind.to_string()).or_insert(0) += 1;
         let total_bytes = state.bytes[kind];
+        let label = state.labels.get(kind).cloned();
         if let Some(bar) = state.bars.get(kind) {
             bar.inc(1);
             // Suppress bytes message for the walking phase — we don't copy
             // anything there, so reporting bytes would be misleading.
-            if kind != "walking" {
-                bar.set_message(format!("{}", HumanBytes(total_bytes)));
-            }
+            let body = if kind == "walking" {
+                String::new()
+            } else {
+                format!("{}", HumanBytes(total_bytes))
+            };
+            bar.set_message(compose_msg(label.as_deref(), &body));
         }
     }
 
@@ -102,13 +108,33 @@ impl Progress for IndicatifProgress {
         let state = self.state.lock().unwrap();
         if let Some(bar) = state.bars.get(kind) {
             let bytes = state.bytes.get(kind).copied().unwrap_or(0);
-            if kind == "walking" {
+            let label = state.labels.get(kind).map(String::as_str);
+            let body = if kind == "walking" {
                 let count = state.counts.get(kind).copied().unwrap_or(0);
-                bar.finish_with_message(format!("({count} objects discovered)"));
+                format!("({count} objects discovered)")
             } else {
-                bar.finish_with_message(format!("done • {}", HumanBytes(bytes)));
-            }
+                format!("done • {}", HumanBytes(bytes))
+            };
+            bar.finish_with_message(compose_msg(label, &body));
         }
+    }
+
+    fn set_phase_label(&self, kind: &str, label: &str) {
+        let mut state = self.state.lock().unwrap();
+        state.labels.insert(kind.to_string(), label.to_string());
+        // Reflect immediately so the bar shows the path even before any
+        // object_copied tick lands.
+        if let Some(bar) = state.bars.get(kind) {
+            bar.set_message(compose_msg(Some(label), ""));
+        }
+    }
+}
+
+fn compose_msg(label: Option<&str>, body: &str) -> String {
+    match (label, body.is_empty()) {
+        (Some(l), true) => l.to_string(),
+        (Some(l), false) => format!("{l} • {body}"),
+        (None, _) => body.to_string(),
     }
 }
 

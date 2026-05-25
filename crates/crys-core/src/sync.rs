@@ -62,6 +62,10 @@ pub trait Progress: Send + Sync {
     fn object_copied(&self, kind: &str, bytes: u64);
     /// Phase done.
     fn finish_phase(&self, kind: &str);
+    /// Optional context for a phase (e.g., the path currently being staged).
+    /// Reporters that don't surface labels can ignore it. Default is no-op
+    /// so existing implementations stay valid.
+    fn set_phase_label(&self, _kind: &str, _label: &str) {}
 }
 
 /// No-op progress reporter for tests and library callers that don't render

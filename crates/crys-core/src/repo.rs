@@ -113,10 +113,22 @@ impl Repo {
     ) -> Result<Self> {
         let workdir = workdir.into();
         let crys_dir = workdir.join(CRYS_DIR);
+        tracing::info!(
+            workdir = %workdir.display(),
+            crys_dir = %crys_dir.display(),
+            "init_with: starting"
+        );
         if crys_dir.exists() {
             return Err(Error::RepoExists(crys_dir.display().to_string()));
         }
-        fs::create_dir_all(&crys_dir).await?;
+        fs::create_dir_all(&crys_dir).await.map_err(|e| {
+            tracing::info!(
+                kind = ?e.kind(),
+                raw_os_error = ?e.raw_os_error(),
+                "init_with: create_dir_all failed"
+            );
+            e
+        })?;
 
         let config = Config {
             remote: remote.into(),
@@ -134,6 +146,7 @@ impl Repo {
         // Pre-create the local object store layout so later phases don't have
         // to special-case the freshly-init'd state.
         LocalStore::open(&crys_dir).await?;
+        tracing::info!("init_with: done");
 
         Ok(Self {
             workdir,

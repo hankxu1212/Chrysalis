@@ -44,7 +44,13 @@ use crate::store::ObjectStore;
 use crate::sync::{NoopProgress, ProgressHandle};
 use crate::{Error, Result};
 
-const CRYSIGNORE: &str = ".crysignore";
+pub(crate) const CRYSIGNORE: &str = ".crysignore";
+
+/// How many files to chunk + upload concurrently during `crys add`. Each
+/// in-flight file holds one OS file handle plus, transiently, one chunk
+/// in memory; the cap keeps a directory of tens of thousands of small
+/// files from blowing through fd limits.
+const ADD_PARALLELISM: usize = 8;
 
 /// Stage a path (or directory tree) into the index.
 ///
@@ -84,8 +90,22 @@ pub async fn add_with_progress<S: ObjectStore>(
 
     // Phase 1: enumerate files. Indeterminate — we don't know the total yet.
     progress.start_phase("walking", 0);
+    // Show the input path so a multi-arg `crys add a b c/` makes it obvious
+    // which iteration is currently in progress.
+    progress.set_phase_label("walking", &abs.display().to_string());
     let walker = WalkBuilder::new(&abs)
-        .hidden(false) // Don't auto-skip dotfiles; .crysignore is the source of truth.
+        // .crysignore is the *only* source of ignore rules. Disable every
+        // other knob the `ignore` crate has on by default — without this,
+        // a global ~/.gitignore or stray .gitignore in any ancestor would
+        // silently drop files (this bit us with `crys add *` on
+        // ~/Downloads where macOS-side global excludes hide image files).
+        .hidden(false)
+        .ignore(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .parents(false)
+        .require_git(false)
         .add_custom_ignore_filename(CRYSIGNORE)
         .filter_entry({
             let crys_dir = repo.crys_dir().to_path_buf();
@@ -119,15 +139,32 @@ pub async fn add_with_progress<S: ObjectStore>(
     }
     progress.finish_phase("walking");
 
-    // Phase 2: chunk + index each file. Total is now known.
+    // Phase 2: chunk + index each file. Total is now known. Run up to
+    // ADD_PARALLELISM files concurrently; chunking is offloaded to the
+    // blocking pool inside `stage_one_file`. The cap exists so a directory
+    // with thousands of small files doesn't open thousands of fds at once.
     progress.start_phase("files", files.len());
-    for (entry_path, rel_posix) in files {
-        let index_entry = stage_one_file(store, &entry_path, chunk_size).await?;
+    progress.set_phase_label("files", &abs.display().to_string());
+    use futures::stream::{FuturesUnordered, StreamExt};
+    let mut in_flight = FuturesUnordered::new();
+    let mut iter = files.into_iter();
+    for _ in 0..ADD_PARALLELISM {
+        if let Some((path, rel)) = iter.next() {
+            in_flight.push(stage_with_path(store, path, rel, chunk_size));
+        } else {
+            break;
+        }
+    }
+    while let Some(result) = in_flight.next().await {
+        let (rel_posix, index_entry) = result?;
         let size = index_entry.size;
         index.entries.insert(rel_posix.clone(), index_entry);
         seen_under_path.insert(rel_posix.clone());
         staged.push(rel_posix);
         progress.object_copied("files", size);
+        if let Some((path, rel)) = iter.next() {
+            in_flight.push(stage_with_path(store, path, rel, chunk_size));
+        }
     }
     progress.finish_phase("files");
 
@@ -164,6 +201,19 @@ fn posix_path_under(abs: &Path, workdir: &Path) -> Option<String> {
     Some(posix_path(rel))
 }
 
+/// `stage_one_file` adapter that carries the relative path through so the
+/// caller can pair completions with their index keys without needing
+/// out-of-band state.
+async fn stage_with_path<S: ObjectStore>(
+    store: &S,
+    path: std::path::PathBuf,
+    rel: String,
+    chunk_size: usize,
+) -> Result<(String, IndexEntry)> {
+    let entry = stage_one_file(store, &path, chunk_size).await?;
+    Ok((rel, entry))
+}
+
 async fn stage_one_file<S: ObjectStore>(
     store: &S,
     path: &Path,
@@ -177,14 +227,27 @@ async fn stage_one_file<S: ObjectStore>(
         .and_then(|t| chrono::DateTime::<Utc>::from(t).to_rfc3339().into())
         .unwrap_or_else(|| Utc::now().to_rfc3339());
 
-    // Chunk → write any missing chunks → collect hashes.
-    let file = std::fs::File::open(path)?;
-    let mut chunker = Chunker::new(file, chunk_size);
-    let mut chunk_hashes = Vec::new();
-    while let Some(chunk) = chunker.next_chunk()? {
-        let hash = chunk_hash(&chunk);
+    // Chunking + hashing is sync and CPU-bound. Hand it to tokio's blocking
+    // pool so multiple `stage_one_file` calls running concurrently actually
+    // span multiple cores instead of stalling the async runtime.
+    let path_buf = path.to_path_buf();
+    let chunks: Vec<(Hash, Vec<u8>)> = tokio::task::spawn_blocking(move || -> Result<_> {
+        let file = std::fs::File::open(&path_buf)?;
+        let mut chunker = Chunker::new(file, chunk_size);
+        let mut out = Vec::new();
+        while let Some(chunk) = chunker.next_chunk()? {
+            let hash = chunk_hash(&chunk);
+            out.push((hash, chunk));
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| Error::Io(std::io::Error::other(format!("blocking task: {e}"))))??;
+
+    let mut chunk_hashes = Vec::with_capacity(chunks.len());
+    for (hash, data) in chunks {
         if !store.has(&hash).await? {
-            store.put(&hash, Bytes::from(chunk)).await?;
+            store.put(&hash, Bytes::from(data)).await?;
         }
         chunk_hashes.push(hash);
     }

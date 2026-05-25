@@ -17,7 +17,7 @@ use ignore::WalkBuilder;
 
 use crate::objects::{CanonicalJson, CommitBody, EntryMode, TreeBody};
 use crate::repo::{IndexFile, Repo};
-use crate::stage::posix_path;
+use crate::stage::{posix_path, CRYSIGNORE};
 use crate::store::ObjectStore;
 use crate::Result;
 
@@ -145,9 +145,20 @@ fn diff_working_tree(
     let mut untracked = BTreeSet::new();
     let mut seen_in_walk = BTreeSet::new();
 
+    // Mirror the walker config in `stage::add` exactly — `.crysignore` is
+    // the sole source of ignore rules. Without disabling these knobs, a
+    // global ~/.gitignore or any ancestor .gitignore would silently mark
+    // working-tree files invisible, leading to "0 untracked files" in a
+    // directory that obviously has files.
     let walker = WalkBuilder::new(repo.workdir())
         .hidden(false)
-        .add_custom_ignore_filename(".crysignore")
+        .ignore(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .parents(false)
+        .require_git(false)
+        .add_custom_ignore_filename(CRYSIGNORE)
         .filter_entry({
             let crys_dir = repo.crys_dir().to_path_buf();
             move |entry| entry.path() != crys_dir
