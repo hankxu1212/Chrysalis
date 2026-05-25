@@ -43,6 +43,11 @@ pub trait ObjectStore: Send + Sync {
     /// Enumerate every hash currently stored. Order is unspecified.
     async fn list(&self) -> Result<Vec<Hash>>;
 
+    /// Remove an object. Implementations may refuse (e.g. the S3 store does
+    /// not support deletion from this code path) by returning an error.
+    /// Deleting a missing hash is a no-op.
+    async fn delete(&self, hash: &Hash) -> Result<()>;
+
     /// Read `HEAD`. Returns `Ok(None)` if `HEAD` is empty (no commits yet).
     /// A missing `HEAD` is also treated as `None` so a freshly-cloned repo
     /// looks identical to a freshly-initialized one.

@@ -121,6 +121,12 @@ impl ObjectStore for S3Store {
         Ok(hashes)
     }
 
+    async fn delete(&self, _hash: &Hash) -> Result<()> {
+        Err(Error::Io(std::io::Error::other(
+            "deleting objects from the S3 store is not supported via this API",
+        )))
+    }
+
     async fn get_head(&self) -> Result<Option<Hash>> {
         let bytes = match self.client.get(&self.bucket, &self.head_key()).await {
             Ok(b) => b,

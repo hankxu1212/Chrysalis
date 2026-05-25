@@ -90,6 +90,14 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Sweep unreachable objects from the local `.crys/objects/` cache.
+    /// Live set = HEAD ∪ REMOTE_HEAD ∪ everything currently in the index.
+    /// Does not touch the remote.
+    Gc {
+        /// Show what would be removed without deleting.
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+    },
     /// Move HEAD and (optionally) reset the index / working tree.
     /// Default mode rebuilds the index from the target commit's tree
     /// (i.e. unstages changes) without touching the working tree.

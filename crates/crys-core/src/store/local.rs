@@ -106,6 +106,15 @@ impl ObjectStore for LocalStore {
         Ok(hashes)
     }
 
+    async fn delete(&self, hash: &Hash) -> Result<()> {
+        let path = self.object_path(hash);
+        match fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     async fn get_head(&self) -> Result<Option<Hash>> {
         let bytes = match fs::read(self.head_path()).await {
             Ok(b) => b,

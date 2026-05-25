@@ -48,6 +48,11 @@ impl ObjectStore for MemoryStore {
         Ok(self.objects.lock().unwrap().keys().cloned().collect())
     }
 
+    async fn delete(&self, hash: &Hash) -> Result<()> {
+        self.objects.lock().unwrap().remove(hash);
+        Ok(())
+    }
+
     async fn get_head(&self) -> Result<Option<Hash>> {
         Ok(self.head.lock().unwrap().clone())
     }

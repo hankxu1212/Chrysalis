@@ -41,6 +41,7 @@ use crate::objects::{
 };
 use crate::repo::{IndexEntry, IndexFile, Repo};
 use crate::store::ObjectStore;
+use crate::sync::{NoopProgress, ProgressHandle};
 use crate::{Error, Result};
 
 const CRYSIGNORE: &str = ".crysignore";
@@ -51,6 +52,19 @@ const CRYSIGNORE: &str = ".crysignore";
 /// Returns the index entries written for each file under the path, keyed by
 /// their working-tree-relative POSIX path.
 pub async fn add<S: ObjectStore>(repo: &Repo, store: &S, path: &Path) -> Result<Vec<String>> {
+    let progress: ProgressHandle = std::sync::Arc::new(NoopProgress);
+    add_with_progress(repo, store, path, &progress).await
+}
+
+/// Like [`add`] but reports progress through the given handle. Emits a
+/// `"walking"` spinner while enumerating files, then a `"files"` bar that
+/// advances per file with the file's size as `bytes`.
+pub async fn add_with_progress<S: ObjectStore>(
+    repo: &Repo,
+    store: &S,
+    path: &Path,
+    progress: &ProgressHandle,
+) -> Result<Vec<String>> {
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -68,6 +82,8 @@ pub async fn add<S: ObjectStore>(repo: &Repo, store: &S, path: &Path) -> Result<
     let mut staged = Vec::new();
     let mut seen_under_path: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // Phase 1: enumerate files. Indeterminate — we don't know the total yet.
+    progress.start_phase("walking", 0);
     let walker = WalkBuilder::new(&abs)
         .hidden(false) // Don't auto-skip dotfiles; .crysignore is the source of truth.
         .add_custom_ignore_filename(CRYSIGNORE)
@@ -77,6 +93,7 @@ pub async fn add<S: ObjectStore>(repo: &Repo, store: &S, path: &Path) -> Result<
         })
         .build();
 
+    let mut files: Vec<(std::path::PathBuf, String)> = Vec::new();
     for entry in walker {
         let entry =
             entry.map_err(|e| Error::Io(std::io::Error::other(format!("walk error: {e}"))))?;
@@ -89,7 +106,6 @@ pub async fn add<S: ObjectStore>(repo: &Repo, store: &S, path: &Path) -> Result<
             continue;
         }
 
-        // Compute working-tree-relative POSIX path for the index key.
         let rel = entry_path.strip_prefix(repo.workdir()).map_err(|_| {
             Error::Io(std::io::Error::other(format!(
                 "path {} is outside workdir {}",
@@ -98,12 +114,22 @@ pub async fn add<S: ObjectStore>(repo: &Repo, store: &S, path: &Path) -> Result<
             )))
         })?;
         let rel_posix = posix_path(rel);
+        progress.object_copied("walking", 0);
+        files.push((entry_path.to_path_buf(), rel_posix));
+    }
+    progress.finish_phase("walking");
 
-        let index_entry = stage_one_file(store, entry_path, chunk_size).await?;
+    // Phase 2: chunk + index each file. Total is now known.
+    progress.start_phase("files", files.len());
+    for (entry_path, rel_posix) in files {
+        let index_entry = stage_one_file(store, &entry_path, chunk_size).await?;
+        let size = index_entry.size;
         index.entries.insert(rel_posix.clone(), index_entry);
         seen_under_path.insert(rel_posix.clone());
         staged.push(rel_posix);
+        progress.object_copied("files", size);
     }
+    progress.finish_phase("files");
 
     // Drop any indexed file that lives under `path` but no longer exists on
     // disk. Without this, `crys add .` after deleting a file silently leaves

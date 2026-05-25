@@ -6,6 +6,7 @@
 pub mod chunker;
 pub mod clean;
 mod error;
+pub mod gc;
 pub mod global_config;
 pub mod log;
 pub mod objects;

@@ -8,18 +8,21 @@ use crys_core::status::status;
 
 use crate::error::CliError;
 use crate::output::{print_log_entry, print_status};
+use crate::progress::{print_progress_summary, ProgressBundle};
 
 pub async fn add(paths: Vec<PathBuf>) -> Result<(), CliError> {
     let cwd = std::env::current_dir()?;
     let repo = Repo::open(&cwd).await.map_err(CliError::from)?;
     let store = repo.store().await.map_err(CliError::from)?;
+    let progress = ProgressBundle::new();
     let mut total = 0usize;
     for path in paths {
-        let staged = stage::add(&repo, &store, &path)
+        let staged = stage::add_with_progress(&repo, &store, &path, &progress.handle)
             .await
             .map_err(CliError::from)?;
         total += staged.len();
     }
+    print_progress_summary(&progress);
     println!("staged {total} file(s)");
     Ok(())
 }
@@ -84,6 +87,30 @@ pub async fn reset(commit: Option<String>, soft: bool, hard: bool) -> Result<(),
     match new_head {
         Some(h) => println!("HEAD is now at {} ({label})", &h.as_hex()[..12]),
         None => println!("HEAD reset to no commit ({label})"),
+    }
+    Ok(())
+}
+
+pub async fn gc(dry_run: bool) -> Result<(), CliError> {
+    let cwd = std::env::current_dir()?;
+    let repo = Repo::open(&cwd).await.map_err(CliError::from)?;
+    let store = repo.store().await.map_err(CliError::from)?;
+    let report = crys_core::gc::gc(&repo, &store, dry_run)
+        .await
+        .map_err(CliError::from)?;
+    if report.removed.is_empty() {
+        println!("nothing to collect ({} live)", report.kept);
+    } else {
+        let verb = if dry_run { "would remove" } else { "removed" };
+        for hash in &report.removed {
+            println!("{verb} {}", &hash.as_hex()[..12]);
+        }
+        println!();
+        println!(
+            "{} object(s) {verb}, {} kept",
+            report.removed.len(),
+            report.kept
+        );
     }
     Ok(())
 }
